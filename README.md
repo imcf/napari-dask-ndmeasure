@@ -1,7 +1,7 @@
-# napari-dask-ndmeasure
+# napari-chunked-regionprops
 
-[![PyPI](https://img.shields.io/pypi/v/napari-dask-ndmeasure.svg)](https://pypi.org/project/napari-dask-ndmeasure/)
-[![Python versions](https://img.shields.io/pypi/pyversions/napari-dask-ndmeasure.svg)](https://pypi.org/project/napari-dask-ndmeasure/)
+[![PyPI](https://img.shields.io/pypi/v/napari-chunked-regionprops.svg)](https://pypi.org/project/napari-chunked-regionprops/)
+[![Python versions](https://img.shields.io/pypi/pyversions/napari-chunked-regionprops.svg)](https://pypi.org/project/napari-chunked-regionprops/)
 [![License: GPLv3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
 Out-of-core, chunk-parallel regionprops-style measurements for **huge**
@@ -20,7 +20,7 @@ time bounded* below).
 ## Install
 
 ```bash
-pip install napari-dask-ndmeasure
+pip install napari-chunked-regionprops
 ```
 
 ## Use
@@ -29,7 +29,7 @@ pip install napari-dask-ndmeasure
    [patchworks](https://github.com/imcf/patchworks)'s
    `view_in_napari(...)`, which also sets each layer's physical `scale`, so
    measurements come out in µm — not just pixels).
-2. `Plugins → Dask ndmeasure → Measure (dask-image)`.
+2. `Plugins → Chunked Regionprops → Measure`.
 3. Pick the Image and Labels layer, check the measurements you want, hit
    **Measure**. The UI stays responsive throughout (runs in a background
    thread) with a progress bar; every measurement is also written to CSV
@@ -111,8 +111,8 @@ pass on a very large volume.
 ## Development
 
 ```bash
-git clone https://github.com/imcf/napari-dask-ndmeasure
-cd napari-dask-ndmeasure
+git clone https://github.com/imcf/napari-chunked-regionprops
+cd napari-chunked-regionprops
 pip install -e ".[dev]"
 pytest
 ```

@@ -1,7 +1,10 @@
 import dask.array as da
 import numpy as np
 
-from napari_dask_ndmeasure._widget import MeasureWidget, _sequential_ids_hint
+from napari_chunked_regionprops._widget import (
+    MeasureWidget,
+    _sequential_ids_hint,
+)
 
 
 def _add_layers(viewer):
@@ -93,7 +96,7 @@ def test_widget_measure_second_run_is_a_cache_hit(
         raise AssertionError("should not recompute on a cache hit")
 
     monkeypatch.setattr(
-        "napari_dask_ndmeasure._widget.iter_measure_labels", _boom
+        "napari_chunked_regionprops._widget.iter_measure_labels", _boom
     )
 
     widget._table = None
@@ -132,7 +135,7 @@ def test_widget_save_csv_writes_table_and_remembers_dir(
     target = tmp_path / "manual" / "out.csv"
     target.parent.mkdir()
     monkeypatch.setattr(
-        "napari_dask_ndmeasure._widget.QFileDialog.getSaveFileName",
+        "napari_chunked_regionprops._widget.QFileDialog.getSaveFileName",
         staticmethod(lambda *a, **k: (str(target), "CSV (*.csv)")),
     )
 
@@ -190,7 +193,7 @@ def test_widget_measure_uses_metadata_hint_to_skip_scan(
     def _boom(*a, **k):
         raise AssertionError("da.unique should not run when the hint applies")
 
-    monkeypatch.setattr("napari_dask_ndmeasure._measure.da.unique", _boom)
+    monkeypatch.setattr("napari_chunked_regionprops._measure.da.unique", _boom)
 
     widget._on_measure_clicked()
     # the "using known object count" status is set synchronously, before the

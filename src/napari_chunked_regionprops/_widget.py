@@ -311,7 +311,7 @@ class MeasureWidget(QWidget):
         ----------
         progress : tuple of (int, int, str)
             ``(done, total, stat_name)`` as yielded by
-            :func:`napari_dask_ndmeasure._measure.iter_measure_labels`.
+            :func:`napari_chunked_regionprops._measure.iter_measure_labels`.
         """
         done, total, stat_name = progress
         self.progress_bar.setMaximum(

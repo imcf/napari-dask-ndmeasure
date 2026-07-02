@@ -2,7 +2,7 @@ import dask.array as da
 import numpy as np
 import pytest
 
-from napari_dask_ndmeasure._measure import (
+from napari_chunked_regionprops._measure import (
     _compute_with_progress,
     _ensure_chunked,
     _lazy_measure,
@@ -244,7 +244,7 @@ def test_iter_measure_labels_ids_skips_the_scan(monkeypatch):
             "da.unique should not be called when ids= is given"
         )
 
-    monkeypatch.setattr("napari_dask_ndmeasure._measure.da.unique", _boom)
+    monkeypatch.setattr("napari_chunked_regionprops._measure.da.unique", _boom)
 
     img, lab = _synthetic()
     gen = iter_measure_labels(img, lab, stats=("area",), ids=np.array([1, 2]))

@@ -3,7 +3,7 @@ requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
-name = "napari-dask-ndmeasure"
+name = "napari-chunked-regionprops"
 dynamic = ["version"]
 description = "Out-of-core regionprops-style measurements for huge labelled images in napari"
 readme = "README.md"
@@ -30,22 +30,22 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# napari-dask-ndmeasure itself doesn't pin a Qt binding at runtime (avoids
+# napari-chunked-regionprops itself doesn't pin a Qt binding at runtime (avoids
 # conflicting with whatever the host napari install already brought in), but
 # the test suite drives real Qt widgets and needs one.
 dev = ["pytest", "pytest-qt", "PyQt5"]
 
 [project.entry-points."napari.manifest"]
-napari-dask-ndmeasure = "napari_dask_ndmeasure:napari.yaml"
+napari-chunked-regionprops = "napari_chunked_regionprops:napari.yaml"
 
 [project.urls]
-Homepage = "https://github.com/imcf/napari-dask-ndmeasure"
+Homepage = "https://github.com/imcf/napari-chunked-regionprops"
 
 [tool.hatch.version]
 source = "vcs"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/napari_dask_ndmeasure"]
+packages = ["src/napari_chunked_regionprops"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

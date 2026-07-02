@@ -49,4 +49,4 @@ sort_commits = "oldest"
 
 [remote.github]
 owner = "imcf"
-repo = "napari-dask-ndmeasure"
+repo = "napari-chunked-regionprops"

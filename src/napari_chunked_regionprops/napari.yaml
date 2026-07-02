@@ -1,0 +1,11 @@
+name: napari-chunked-regionprops
+display_name: Chunked Regionprops
+schema_version: 0.2.0
+contributions:
+  commands:
+    - id: napari-chunked-regionprops.measure_widget
+      title: Open Measure widget
+      python_name: napari_chunked_regionprops._widget:MeasureWidget
+  widgets:
+    - command: napari-chunked-regionprops.measure_widget
+      display_name: Measure
