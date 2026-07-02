@@ -66,9 +66,17 @@ Two things matter for a huge volume, both handled automatically:
   chunks; computing them separately means every chunk gets read and decoded
   once *per stat* (4 default stats = 4 full passes over the data). Computing
   them together lets dask's scheduler share the chunk-read work across all
-  of them. The trade-off: progress reporting is two coarse phases (scanning,
-  then computing) rather than one tick per stat — the fine-grained version
-  needed the separate, slower calls to work.
+  of them. Progress is reported per dask task within each of the two
+  phases (scanning, then computing) — real counts from the running
+  computation, not a fixed per-stat tick.
+- **Skipping the scan.** If the Labels layer came from
+  [patchworks](https://github.com/imcf/patchworks)'s `view_in_napari(...)`
+  with `sequential_labels=True` at merge time, the layer carries a
+  known-object-count hint. At pyramid level 0 (full resolution) this lets
+  the plugin skip the whole-volume "scanning for objects" pass entirely —
+  the status bar says "using known object count (N) — skipping scan" when
+  this kicks in. Not trusted at coarser pyramid levels, since downsampling
+  can drop small objects.
 
 The **Workers** spin box controls how many threads that combined computation
 uses (default `min(4, cpu count)`). More workers can mean more decoded

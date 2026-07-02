@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import numpy as np
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QComboBox,
@@ -36,6 +37,40 @@ def _level_data(layer, level: int):
     """Return one dask array from a (possibly multiscale) layer's data."""
     data = layer.data
     return data[level] if layer.multiscale else data
+
+
+def _sequential_ids_hint(labels_layer, level: int) -> "np.ndarray | None":
+    """Build the exact id array from a Labels layer's known-object-count hint.
+
+    patchworks' ``view_in_napari`` sets ``layer.metadata["n_objects"]`` /
+    ``["sequential_labels"]`` when the labels were renumbered to a
+    contiguous ``1..N`` range at write time (``sequential_labels=True``
+    during the merge) — the exact id set is then ``range(1, N + 1)`` by
+    construction, with no need to scan the array for it.
+
+    Only trusted at ``level == 0`` (full resolution): a coarser pyramid
+    level's strided downsampling can drop small objects entirely, so the
+    id set from level 0 doesn't necessarily hold there.
+
+    Parameters
+    ----------
+    labels_layer : napari.layers.Labels
+        The selected Labels layer.
+    level : int
+        The pyramid level about to be measured.
+
+    Returns
+    -------
+    np.ndarray or None
+        ``np.arange(1, n_objects + 1)`` if the hint is present and
+        trustworthy at this level, else ``None``.
+    """
+    if level != 0:
+        return None
+    meta = labels_layer.metadata
+    if not meta.get("sequential_labels") or "n_objects" not in meta:
+        return None
+    return np.arange(1, int(meta["n_objects"]) + 1, dtype="int64")
 
 
 class MeasureWidget(QWidget):
@@ -227,6 +262,8 @@ class MeasureWidget(QWidget):
             self._on_measured(cached, cache_key=cache_key, from_cache=True)
             return
 
+        ids_hint = _sequential_ids_hint(labels_layer, level)
+
         self.measure_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
         # min == max is Qt's native "busy" (indeterminate) mode — start here
@@ -235,7 +272,13 @@ class MeasureWidget(QWidget):
         # sub-progress and can take a while on a huge volume; a literal 0/N
         # bar would look frozen for that whole stretch.
         self.progress_bar.setRange(0, 0)
-        self.status_label.setText("Measuring…")
+        if ids_hint is not None:
+            self.status_label.setText(
+                f"Measuring… using known object count "
+                f"({ids_hint.size}) — skipping scan."
+            )
+        else:
+            self.status_label.setText("Measuring…")
 
         n_workers = self.workers_spin.value()
 
@@ -247,6 +290,7 @@ class MeasureWidget(QWidget):
                 stats=stats,
                 scale=scale,
                 n_workers=n_workers,
+                ids=ids_hint,
             )
             return result
 

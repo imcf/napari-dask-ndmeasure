@@ -143,16 +143,30 @@ def _drain(gen):
 def test_iter_measure_labels_yields_progress_then_returns_table():
     # All requested stats are now computed together in one dask.compute()
     # call (see the Notes in iter_measure_labels' docstring for why), so
-    # progress is two coarse, indeterminate (total=0) phase markers rather
-    # than one per stat.
+    # there are two phases: "scanning for objects" then "computing N
+    # measurement(s)" — each with real, growing (done, total) dask task
+    # counts (not a fixed count — exact task counts are a dask-graph
+    # implementation detail we shouldn't pin to a magic number).
     img, lab = _synthetic()
     gen = iter_measure_labels(img, lab, stats=("area", "mean_intensity"))
     progress, table = _drain(gen)
 
-    assert progress == [
-        (0, 0, "scanning for objects"),
-        (0, 0, "computing 2 measurement(s)"),
-    ]
+    assert progress, "expected at least one progress update"
+    phases = [p[2] for p in progress]
+    assert set(phases) == {"scanning for objects", "computing 2 measurement(s)"}
+    # everything from the scanning phase comes before everything from the
+    # computing phase (no interleaving between the two)
+    scan_end = max(
+        i for i, p in enumerate(phases) if p == "scanning for objects"
+    )
+    compute_start = min(
+        i for i, p in enumerate(phases) if p == "computing 2 measurement(s)"
+    )
+    assert scan_end < compute_start
+
+    for done, total, _ in progress:
+        assert 0 <= done <= total
+
     assert table.loc[1, "area"] == 4
 
 
@@ -161,6 +175,36 @@ def test_iter_measure_labels_return_value_matches_measure_labels():
     _, table_from_iter = _drain(iter_measure_labels(img, lab))
     table_from_wrapper = measure_labels(img, lab)
     assert table_from_iter.equals(table_from_wrapper)
+
+
+def test_iter_measure_labels_ids_skips_the_scan(monkeypatch):
+    # When the caller already knows the id set (e.g. a producer guarantees
+    # sequential 1..N labels), the whole-volume scan must not run at all —
+    # that scan is itself a full pass over the data, the whole point of
+    # accepting ids= is to skip paying for it.
+    def _boom(*a, **k):
+        raise AssertionError(
+            "da.unique should not be called when ids= is given"
+        )
+
+    monkeypatch.setattr("napari_dask_ndmeasure._measure.da.unique", _boom)
+
+    img, lab = _synthetic()
+    gen = iter_measure_labels(img, lab, stats=("area",), ids=np.array([1, 2]))
+    progress, table = _drain(gen)
+
+    assert all(p[2] != "scanning for objects" for p in progress)
+    assert table.loc[1, "area"] == 4
+    assert table.loc[2, "area"] == 4
+
+
+def test_measure_labels_ids_matches_scanned_result():
+    img, lab = _synthetic()
+    table_scanned = measure_labels(img, lab, stats=available_stats())
+    table_with_ids = measure_labels(
+        img, lab, stats=available_stats(), ids=np.array([1, 2])
+    )
+    assert table_scanned.equals(table_with_ids)
 
 
 def test_measure_labels_n_workers_does_not_change_result():

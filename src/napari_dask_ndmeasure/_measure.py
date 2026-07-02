@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import math
 import os
+import queue
+import threading
 from typing import Any, Generator, Sequence
 
 import dask
 import dask.array as da
 import numpy as np
 import pandas as pd
+from dask.diagnostics import Callback
 
 #: stat name -> dask_image.ndmeasure function name, and whether it needs the
 #: real intensity image (False = geometric only, computed on a dummy image).
@@ -61,6 +64,88 @@ def _needs_rechunk(arr: da.Array) -> bool:
         True if *arr*'s largest chunk exceeds :data:`_MAX_CHUNK_BYTES`.
     """
     return math.prod(arr.chunksize) * arr.dtype.itemsize > _MAX_CHUNK_BYTES
+
+
+class _QueueProgress(Callback):
+    """Dask diagnostics callback that pushes ``(done, total)`` task counts.
+
+    Mirrors ``dask.diagnostics.progress.ProgressBar``'s own bookkeeping
+    (``len(state["finished"])`` vs. every task across ``ready``/``waiting``/
+    ``running``/``finished``) but pushes onto a queue instead of drawing a
+    terminal bar, so a caller on a different thread can consume real,
+    per-task progress from a running ``dask.compute()`` call.
+    """
+
+    def __init__(self, q: "queue.Queue[tuple[int, int]]"):
+        self._queue = q
+
+    def _start_state(self, dsk, state):
+        self._emit(state)
+
+    def _posttask(self, key, result, dsk, state, worker_id):
+        self._emit(state)
+
+    def _emit(self, state):
+        done = len(state["finished"])
+        total = (
+            sum(len(state[k]) for k in ("ready", "waiting", "running")) + done
+        )
+        self._queue.put((done, total))
+
+
+def _compute_with_progress(
+    lazy_values: Sequence[Any], num_workers: int
+) -> Generator[tuple[int, int], None, tuple]:
+    """Run ``dask.compute(*lazy_values)`` in a background thread, yielding progress.
+
+    Parameters
+    ----------
+    lazy_values : sequence
+        Dask collections to compute together (shares work across them the
+        same way a single :func:`dask.compute` call always does).
+    num_workers : int
+        Thread count for the computation.
+
+    Yields
+    ------
+    tuple of (int, int)
+        ``(done, total)`` dask task counts, pushed by :class:`_QueueProgress`
+        every time a task finishes. ``total`` can grow between yields early
+        on, as dask discovers more of the graph — treat it as "at least
+        this many", not a fixed denominator from the first yield.
+
+    Returns
+    -------
+    tuple
+        The computed results, in the same order as *lazy_values* — exactly
+        what ``dask.compute(*lazy_values)`` would have returned directly.
+    """
+    q: "queue.Queue[tuple[int, int] | None]" = queue.Queue()
+    result_box: dict[str, tuple] = {}
+    error_box: dict[str, BaseException] = {}
+
+    def _run():
+        try:
+            with _QueueProgress(q):
+                result_box["value"] = dask.compute(
+                    *lazy_values, num_workers=num_workers
+                )
+        except BaseException as exc:  # re-raised on the caller's thread below
+            error_box["error"] = exc
+        finally:
+            q.put(None)  # sentinel: no more progress coming
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    while True:
+        item = q.get()
+        if item is None:
+            break
+        yield item
+    thread.join()
+    if "error" in error_box:
+        raise error_box["error"]
+    return result_box["value"]
 
 
 def available_stats() -> tuple[str, ...]:
@@ -132,6 +217,7 @@ def iter_measure_labels(
     stats: Sequence[str] = DEFAULT_STATS,
     scale: Sequence[float] | None = None,
     n_workers: int | None = None,
+    ids: np.ndarray | None = None,
 ) -> Generator[tuple[int, int, str], None, pd.DataFrame]:
     """Generator version of :func:`measure_labels` — yields progress.
 
@@ -162,17 +248,29 @@ def iter_measure_labels(
         trades a bit of wall-clock speed for a bounded RAM ceiling. Raise it
         if you have RAM to spare and want it faster; lower it (even to 1)
         if measuring is still using too much memory.
+    ids : np.ndarray or None, optional
+        The exact set of non-background label ids present in *labels*, if
+        already known (e.g. a producer that renumbers labels to a
+        contiguous ``1..N`` range, like patchworks with
+        ``sequential_labels=True``, can hand you ``np.arange(1, N + 1)``
+        directly). When given, the whole-volume scan that would otherwise
+        find this (the "scanning for objects" phase) is skipped entirely —
+        for a huge volume that scan is itself a full pass over the data, so
+        this can save as much time as the measurement itself. Wrong/stale
+        ids here silently produce a table for the wrong id set — only pass
+        this when you're certain it's still accurate for the exact array
+        given.
 
     Yields
     ------
     tuple of (int, int, str)
-        Two informational markers, always with ``total=0`` (an
-        indeterminate "still working" signal — there's no meaningful
-        fine-grained progress to report within either phase):
-        ``(0, 0, "scanning for objects")`` before the one whole-volume scan
-        that finds every distinct label id, then ``(0, 0, "computing N
-        measurement(s)")`` before all requested stats are computed together
-        in a single pass (see the *Notes* below).
+        ``(done, total, phase)`` — real dask task counts, updated as
+        computation progresses within each phase (``phase`` is
+        ``"scanning for objects"``, skipped entirely when *ids* is given,
+        or ``"computing N measurement(s)"``). ``total`` can grow between
+        yields early in a phase as dask discovers more of the graph, so
+        it's "at least this many so far", not a value fixed from the first
+        yield of that phase.
 
     Returns
     -------
@@ -191,10 +289,7 @@ def iter_measure_labels(
     mean dask re-reads and re-decodes every chunk once *per stat* (4
     default stats -> 4 full passes over the data). Computing them together
     lets the scheduler recognize the shared chunk-read tasks and run each
-    one once, regardless of how many stats need it — this is why progress
-    is now two coarse phases rather than one per stat: the per-stat
-    granularity from an earlier version required keeping the stats
-    computed separately, which was the more expensive path.
+    one once, regardless of how many stats need it.
 
     Examples
     --------
@@ -205,14 +300,14 @@ def iter_measure_labels(
     ...     np.array([[1, 1, 0, 0], [1, 1, 0, 0], [0, 0, 2, 2], [0, 0, 2, 2]])
     ... )
     >>> gen = iter_measure_labels(img, lab, stats=("area", "mean_intensity"))
-    >>> next(gen)
-    (0, 0, 'scanning for objects')
-    >>> next(gen)
-    (0, 0, 'computing 2 measurement(s)')
+    >>> progress = []
     >>> try:
-    ...     next(gen)
+    ...     while True:
+    ...         progress.append(next(gen))
     ... except StopIteration as stop:
     ...     table = stop.value
+    >>> sorted({p[2] for p in progress})
+    ['computing 2 measurement(s)', 'scanning for objects']
     >>> int(table.loc[1, "area"])
     4
     """
@@ -229,28 +324,29 @@ def iter_measure_labels(
     import dask_image.ndmeasure as ndm
 
     image, labels = _ensure_chunked(image, labels)
+    nw = n_workers if n_workers is not None else min(4, os.cpu_count() or 1)
 
-    # This scan touches every voxel once and can take a while on a huge
-    # volume, with no natural sub-progress to report — yield an early
-    # "still alive" marker (total=0 signals indeterminate) before it, so a
-    # caller driving this as a progress bar doesn't sit at a literal 0 with
-    # no feedback for however long this takes.
-    yield 0, 0, "scanning for objects"
+    if ids is not None:
+        ids = np.asarray(ids)
+    else:
+        # da.unique(labels[labels > 0]) looked more direct, but boolean-
+        # masked fancy indexing on a dask array produces unknown chunk
+        # sizes, which makes the unique()/reduction tree behind it
+        # materially more expensive than necessary. da.unique(labels) has a
+        # dedicated, well-optimized chunk-wise-unique + tree-reduce
+        # implementation; dropping 0 from the (tiny, already-in-RAM) result
+        # afterwards is essentially free.
+        progress_gen = _compute_with_progress([da.unique(labels)], nw)
+        try:
+            while True:
+                done, total = next(progress_gen)
+                yield done, total, "scanning for objects"
+        except StopIteration as stop:
+            (ids,) = stop.value
+        ids = ids[ids > 0]
 
-    # da.unique(labels[labels > 0]) looked more direct, but boolean-masked
-    # fancy indexing on a dask array produces unknown chunk sizes, which
-    # makes the unique()/reduction tree behind it materially more expensive
-    # than necessary. da.unique(labels) has a dedicated, well-optimized
-    # chunk-wise-unique + tree-reduce implementation; dropping 0 from the
-    # (tiny, already-in-RAM) result afterwards is essentially free.
-    ids = da.unique(labels).compute()
-    ids = ids[ids > 0]
     if ids.size == 0:
         return pd.DataFrame(index=pd.Index([], name="label"))
-
-    yield 0, 0, f"computing {len(stats)} measurement(s)"
-
-    nw = n_workers if n_workers is not None else min(4, os.cpu_count() or 1)
 
     # Build every stat as a *lazy* dask array first, then compute them all
     # together — see the Notes section above for why.
@@ -261,7 +357,14 @@ def iter_measure_labels(
         )
         for stat in stats
     }
-    computed = dask.compute(*lazy.values(), num_workers=nw)
+    progress_gen = _compute_with_progress(list(lazy.values()), nw)
+    phase = f"computing {len(stats)} measurement(s)"
+    try:
+        while True:
+            done, total = next(progress_gen)
+            yield done, total, phase
+    except StopIteration as stop:
+        computed = stop.value
 
     columns: dict[str, np.ndarray] = {}
     for stat, result in zip(lazy.keys(), computed):
@@ -296,6 +399,7 @@ def measure_labels(
     stats: Sequence[str] = DEFAULT_STATS,
     scale: Sequence[float] | None = None,
     n_workers: int | None = None,
+    ids: np.ndarray | None = None,
 ) -> pd.DataFrame:
     """Measure every non-background object in *labels* against *image*.
 
@@ -318,6 +422,10 @@ def measure_labels(
         Threads used for the combined stat computation. Default
         ``min(4, cpu_count)`` — see :func:`iter_measure_labels` for the
         speed/RAM trade-off this controls.
+    ids : np.ndarray or None, optional
+        The exact set of non-background label ids, if already known — see
+        :func:`iter_measure_labels` for when this is safe to pass and what
+        it saves.
 
     Returns
     -------
@@ -337,7 +445,12 @@ def measure_labels(
     4
     """
     gen = iter_measure_labels(
-        image, labels, stats=stats, scale=scale, n_workers=n_workers
+        image,
+        labels,
+        stats=stats,
+        scale=scale,
+        n_workers=n_workers,
+        ids=ids,
     )
     try:
         while True:

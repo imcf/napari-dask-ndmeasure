@@ -1,7 +1,7 @@
 import dask.array as da
 import numpy as np
 
-from napari_dask_ndmeasure._widget import MeasureWidget
+from napari_dask_ndmeasure._widget import MeasureWidget, _sequential_ids_hint
 
 
 def _add_layers(viewer):
@@ -141,6 +141,67 @@ def test_widget_save_csv_writes_table_and_remembers_dir(
     assert target.exists()
     assert "area" in target.read_text()
     assert widget._save_dir == target.parent
+
+
+def test_sequential_ids_hint_present_at_level_zero(make_napari_viewer):
+    viewer = make_napari_viewer()
+    _add_layers(viewer)
+    labels_layer = viewer.layers["labels"]
+    labels_layer.metadata["sequential_labels"] = True
+    labels_layer.metadata["n_objects"] = 2
+
+    ids = _sequential_ids_hint(labels_layer, level=0)
+    assert np.array_equal(ids, np.array([1, 2]))
+
+
+def test_sequential_ids_hint_ignored_at_higher_level(make_napari_viewer):
+    # A coarser pyramid level's strided downsampling can drop small objects
+    # entirely, so the exact id set from level 0 doesn't necessarily hold
+    # at level > 0 — the hint must not be trusted there.
+    viewer = make_napari_viewer()
+    _add_layers(viewer)
+    labels_layer = viewer.layers["labels"]
+    labels_layer.metadata["sequential_labels"] = True
+    labels_layer.metadata["n_objects"] = 2
+
+    assert _sequential_ids_hint(labels_layer, level=1) is None
+
+
+def test_sequential_ids_hint_absent_without_metadata(make_napari_viewer):
+    viewer = make_napari_viewer()
+    _add_layers(viewer)
+    labels_layer = viewer.layers["labels"]
+
+    assert _sequential_ids_hint(labels_layer, level=0) is None
+
+
+def test_widget_measure_uses_metadata_hint_to_skip_scan(
+    qtbot, make_napari_viewer, monkeypatch, tmp_path
+):
+    viewer = make_napari_viewer()
+    _add_layers(viewer)
+    labels_layer = viewer.layers["labels"]
+    labels_layer.metadata["sequential_labels"] = True
+    labels_layer.metadata["n_objects"] = 2
+
+    widget = MeasureWidget(viewer)
+    widget._save_dir = tmp_path
+
+    def _boom(*a, **k):
+        raise AssertionError("da.unique should not run when the hint applies")
+
+    monkeypatch.setattr("napari_dask_ndmeasure._measure.da.unique", _boom)
+
+    widget._on_measure_clicked()
+    # the "using known object count" status is set synchronously, before the
+    # (threaded) measurement starts — check it right away, since it's
+    # overwritten by the final "N objects measured" status once done, which
+    # for this tiny synthetic array can happen almost instantly.
+    assert "using known object count (2)" in widget.status_label.text()
+
+    qtbot.waitUntil(lambda: widget._table is not None, timeout=5000)
+    assert list(widget._table.index) == [1, 2]
+    assert widget._table.loc[1, "area"] == 4
 
 
 def test_widget_level_range_updates_for_multiscale(make_napari_viewer):
