@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "Out-of-core regionprops-style measurements for huge labelled images in napari"
 readme = "README.md"
 license = { text = "GPL-3.0-only" }
-authors = [{ name = "IMCF Basel" }]
+authors = [{ name = "Laurent Guerard", email = "laurent.guerard@unibas.ch" }]
 keywords = ["napari", "image processing", "regionprops", "dask", "bioimage"]
 classifiers = [
     "Development Status :: 3 - Alpha",
