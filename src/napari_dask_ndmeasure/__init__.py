@@ -1,8 +1,9 @@
 """napari-dask-ndmeasure — out-of-core regionprops for huge labelled images.
 
-Measures Labels layers directly from their backing dask/zarr arrays via
-``dask_image.ndmeasure``, so a hundred-thousand-object OME-ZARR volume never
-needs to be pulled into RAM the way ``skimage.measure.regionprops`` would.
+Measures Labels layers directly from their backing dask/zarr arrays via a
+chunk-local map + merge (see :mod:`napari_dask_ndmeasure._measure`), so a
+hundred-thousand-object OME-ZARR volume never needs to be pulled into RAM
+the way ``skimage.measure.regionprops`` would.
 """
 
 from importlib.metadata import PackageNotFoundError

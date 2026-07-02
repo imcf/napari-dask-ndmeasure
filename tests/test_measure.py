@@ -5,6 +5,7 @@ import pytest
 from napari_dask_ndmeasure._measure import (
     _compute_with_progress,
     _ensure_chunked,
+    _lazy_measure,
     _needs_rechunk,
     available_stats,
     iter_measure_labels,
@@ -169,6 +170,37 @@ def test_iter_measure_labels_yields_progress_then_returns_table():
         assert 0 <= done <= total
 
     assert table.loc[1, "area"] == 4
+
+
+def test_lazy_measure_graph_scales_with_chunks_not_objects():
+    # The whole point of the map/merge rewrite: an earlier version wrapped
+    # dask_image.ndmeasure, whose labeled_comprehension builds one task
+    # *per requested object id* (times every chunk) — for a high object
+    # count that made the task graph itself the bottleneck. The new engine
+    # builds one map task per chunk (regardless of how many ids are inside
+    # it) plus one merge task, so graph size must track chunk count, not
+    # object count, even with thousands of objects.
+    n_objects = 2000
+    size, chunk = 400, 40  # 10x10 = 100 chunks
+    rng = np.random.default_rng(0)
+    lab_np = np.zeros((size, size), dtype="int32")
+    ys = rng.integers(0, size, n_objects)
+    xs = rng.integers(0, size, n_objects)
+    lab_np[ys, xs] = np.arange(1, n_objects + 1)
+
+    image = da.zeros((size, size), dtype="float32", chunks=(chunk, chunk))
+    labels = da.from_array(lab_np, chunks=(chunk, chunk))
+    ids = np.arange(1, n_objects + 1)
+    n_chunks = labels.numblocks[0] * labels.numblocks[1]
+
+    graph = _lazy_measure(image, labels, ids, ("area", "mean_intensity"))
+    n_tasks = len(graph.__dask_graph__())
+
+    # A per-object-id design would need on the order of n_chunks * n_objects
+    # tasks (200,000+ here) just for the label-matching step. A per-chunk
+    # design needs a small constant multiple of n_chunks.
+    assert n_tasks < 10 * n_chunks
+    assert n_tasks < n_objects  # sanity: nowhere near per-object scaling
 
 
 def test_compute_with_progress_yield_count_bounded_not_per_task():

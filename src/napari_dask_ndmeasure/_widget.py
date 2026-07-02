@@ -74,7 +74,7 @@ def _sequential_ids_hint(labels_layer, level: int) -> "np.ndarray | None":
 
 
 class MeasureWidget(QWidget):
-    """Measure a Labels layer against an Image layer via dask-image.
+    """Measure a Labels layer against an Image layer via a chunk-local map/merge.
 
     Works directly on the layers' backing dask arrays — never pulls a
     hundred-thousand-object volume into RAM the way

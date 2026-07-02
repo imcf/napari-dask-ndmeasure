@@ -1,9 +1,12 @@
 """Out-of-core, chunk-parallel regionprops-style measurements.
 
-Wraps ``dask_image.ndmeasure`` so a labelled OME-ZARR volume with hundreds of
-thousands of objects can be measured directly from disk/dask — unlike
-``skimage.measure.regionprops``, which needs the full labelled + intensity
-array in RAM.
+Measures a labelled OME-ZARR volume with hundreds of thousands of objects
+directly from disk/dask — unlike ``skimage.measure.regionprops``, which
+needs the full labelled + intensity array in RAM. Each chunk is aggregated
+locally (one ``scipy.ndimage`` call per chunk, over every id actually
+present in it), then merged across chunks in a single numpy pass — task
+count scales with chunk count, not with object count (see the Notes in
+:func:`iter_measure_labels` for why that distinction matters).
 """
 
 from __future__ import annotations
@@ -17,28 +20,30 @@ import dask
 import dask.array as da
 import numpy as np
 import pandas as pd
+import scipy.ndimage as ndi
+from dask import delayed
 from dask.diagnostics import Callback
 
-#: stat name -> dask_image.ndmeasure function name, and whether it needs the
-#: real intensity image (False = geometric only, computed on a dummy image).
-_STATS: dict[str, tuple[str, bool]] = {
-    "area": ("area", False),
-    "centroid": ("center_of_mass", False),
-    "mean_intensity": ("mean", True),
-    "std_intensity": ("standard_deviation", True),
-    "min_intensity": ("minimum", True),
-    "max_intensity": ("maximum", True),
-    "weighted_centroid": ("center_of_mass", True),
+#: stat name -> whether it needs the real intensity image (False = purely
+#: geometric, derived from label positions alone).
+_STATS: dict[str, bool] = {
+    "area": False,
+    "centroid": False,
+    "mean_intensity": True,
+    "std_intensity": True,
+    "min_intensity": True,
+    "max_intensity": True,
+    "weighted_centroid": True,
 }
 
 DEFAULT_STATS = ("area", "centroid", "mean_intensity", "std_intensity")
 
 # Target ~128 MB dask chunks (dask's own default) when an input isn't already
 # chunked sensibly. Without this, a plain numpy array (or a dask array
-# wrapped without chunks=) becomes ONE giant chunk, and dask_image.ndmeasure
-# then has to hold the whole thing in RAM during .compute() — silently
-# defeating the entire point of this plugin on exactly the huge images it's
-# meant for.
+# wrapped without chunks=) becomes ONE giant chunk, and the per-chunk
+# aggregation in _chunk_partial then has to hold the whole thing in RAM at
+# once — silently defeating the entire point of this plugin on exactly the
+# huge images it's meant for.
 _CHUNK_TARGET = "auto"
 # Only rechunk when a chunk is pathologically large (the single-giant-chunk
 # case above). A layer that's already a well-chunked OME-ZARR pyramid (the
@@ -246,6 +251,251 @@ def _ensure_chunked(image: Any, labels: Any) -> tuple[da.Array, da.Array]:
     return image, labels
 
 
+#: stat name -> the raw per-chunk/merge quantities it needs (see
+#: :func:`_chunk_partial`/:func:`_merge_partials`). Union these across every
+#: requested stat to know what a given call actually has to compute.
+_STAT_WANTS: dict[str, tuple[str, ...]] = {
+    "area": ("count",),
+    "centroid": ("count", "pos_sum"),
+    "mean_intensity": ("count", "sum"),
+    "std_intensity": ("count", "sum", "sumsq"),
+    "min_intensity": ("min",),
+    "max_intensity": ("max",),
+    "weighted_centroid": ("sum", "wpos_sum"),
+}
+
+
+def _chunk_partial(
+    label_chunk: np.ndarray,
+    image_chunk: "np.ndarray | None",
+    offset: tuple[int, ...],
+    want: frozenset[str],
+) -> "dict[str, np.ndarray] | None":
+    """Aggregate one chunk's voxels into small per-local-id partial sums.
+
+    The fix for ``dask_image.ndmeasure``'s per-object-id task blowup: every
+    ``scipy.ndimage`` call here runs **once per chunk**, over whichever ids
+    are actually present in *that* chunk (typically a small fraction of the
+    total object count) — scipy already vectorizes internally over an
+    ``index=`` array, so there was never a need to call it once per id.
+
+    Parameters
+    ----------
+    label_chunk : np.ndarray
+        One chunk's worth of labels.
+    image_chunk : np.ndarray or None
+        The matching intensity chunk, or ``None`` if nothing in *want*
+        needs real intensity data (skips reading/passing it entirely).
+    offset : tuple of int
+        This chunk's start position along each axis in the full array —
+        needed so position sums (for centroids) are in global, not
+        chunk-local, coordinates.
+    want : frozenset of str
+        Which raw quantities to compute: any of ``"count"``, ``"sum"``,
+        ``"sumsq"``, ``"min"``, ``"max"``, ``"pos_sum"``, ``"wpos_sum"``.
+
+    Returns
+    -------
+    dict of str to np.ndarray, or None
+        ``None`` if the chunk has no non-background labels. Otherwise a
+        dict with an ``"ids"`` array (the chunk's local non-background ids,
+        ascending) plus one array per requested quantity in *want*, each
+        aligned index-for-index with ``"ids"``.
+    """
+    local_ids = np.unique(label_chunk)
+    local_ids = local_ids[local_ids > 0]
+    if local_ids.size == 0:
+        return None
+
+    partial: dict[str, np.ndarray] = {"ids": local_ids}
+    if "count" in want:
+        ones = np.ones(label_chunk.shape, dtype="float64")
+        partial["count"] = np.atleast_1d(
+            ndi.sum_labels(ones, label_chunk, local_ids)
+        )
+    if "sum" in want:
+        partial["sum"] = np.atleast_1d(
+            ndi.sum_labels(image_chunk, label_chunk, local_ids)
+        )
+    if "sumsq" in want:
+        partial["sumsq"] = np.atleast_1d(
+            ndi.sum_labels(
+                image_chunk.astype("float64") ** 2, label_chunk, local_ids
+            )
+        )
+    if "min" in want:
+        partial["min"] = np.atleast_1d(
+            ndi.minimum(image_chunk, label_chunk, local_ids)
+        )
+    if "max" in want:
+        partial["max"] = np.atleast_1d(
+            ndi.maximum(image_chunk, label_chunk, local_ids)
+        )
+    if "pos_sum" in want or "wpos_sum" in want:
+        grids = np.indices(label_chunk.shape, dtype="float64")
+        for axis in range(label_chunk.ndim):
+            grids[axis] += offset[axis]
+        if "pos_sum" in want:
+            partial["pos_sum"] = np.stack(
+                [
+                    np.atleast_1d(
+                        ndi.sum_labels(grids[axis], label_chunk, local_ids)
+                    )
+                    for axis in range(label_chunk.ndim)
+                ],
+                axis=1,
+            )
+        if "wpos_sum" in want:
+            partial["wpos_sum"] = np.stack(
+                [
+                    np.atleast_1d(
+                        ndi.sum_labels(
+                            grids[axis] * image_chunk, label_chunk, local_ids
+                        )
+                    )
+                    for axis in range(label_chunk.ndim)
+                ],
+                axis=1,
+            )
+    return partial
+
+
+def _merge_partials(
+    partials: "list[dict[str, np.ndarray] | None]",
+    ids: np.ndarray,
+    stats: Sequence[str],
+    ndim: int,
+) -> dict[str, np.ndarray]:
+    """Combine every chunk's partial sums into the final per-stat columns.
+
+    Runs once, after every :func:`_chunk_partial` call has finished. The
+    gathered data here is bounded by how many (chunk, id) pairs exist —
+    objects × however many chunks each one spans (usually 1, occasionally a
+    few near boundaries) — not by voxel count, so one eager numpy merge is
+    fine even for a huge volume.
+
+    Parameters
+    ----------
+    partials : list of (dict or None)
+        One entry per chunk, as returned by :func:`_chunk_partial`.
+    ids : np.ndarray
+        Every non-background label id the final table must have a row for.
+        Any order — this doesn't assume *ids* is sorted.
+    stats : sequence of str
+        Which output columns to build (see :data:`_STAT_WANTS`).
+    ndim : int
+        Spatial dimensionality of the labels array (for axis-suffixed
+        centroid column names).
+
+    Returns
+    -------
+    dict of str to np.ndarray
+        One entry per output column (e.g. ``"area"``, ``"centroid_y"``,
+        ``"mean_intensity"``), each aligned index-for-index with *ids*.
+    """
+    want = frozenset(w for s in stats for w in _STAT_WANTS[s])
+    n = ids.size
+    # Map an arbitrary (not-necessarily-sorted) id to its position in `ids`
+    # via one sort, rather than assuming callers hand us sorted ids.
+    order = np.argsort(ids)
+    sorted_ids = ids[order]
+
+    count = np.zeros(n) if "count" in want else None
+    sum_ = np.zeros(n) if "sum" in want else None
+    sumsq = np.zeros(n) if "sumsq" in want else None
+    min_ = np.full(n, np.inf) if "min" in want else None
+    max_ = np.full(n, -np.inf) if "max" in want else None
+    pos_sum = np.zeros((n, ndim)) if "pos_sum" in want else None
+    wpos_sum = np.zeros((n, ndim)) if "wpos_sum" in want else None
+
+    for p in partials:
+        if p is None:
+            continue
+        pos = order[np.searchsorted(sorted_ids, p["ids"])]
+        if count is not None:
+            count[pos] += p["count"]
+        if sum_ is not None:
+            sum_[pos] += p["sum"]
+        if sumsq is not None:
+            sumsq[pos] += p["sumsq"]
+        if min_ is not None:
+            min_[pos] = np.minimum(min_[pos], p["min"])
+        if max_ is not None:
+            max_[pos] = np.maximum(max_[pos], p["max"])
+        if pos_sum is not None:
+            pos_sum[pos] += p["pos_sum"]
+        if wpos_sum is not None:
+            wpos_sum[pos] += p["wpos_sum"]
+
+    axis_names = "zyx"[-ndim:]
+    columns: dict[str, np.ndarray] = {}
+    for stat in stats:
+        if stat == "area":
+            columns["area"] = count
+        elif stat == "mean_intensity":
+            columns["mean_intensity"] = sum_ / count
+        elif stat == "std_intensity":
+            mean = sum_ / count
+            columns["std_intensity"] = np.sqrt(sumsq / count - mean**2)
+        elif stat == "min_intensity":
+            columns["min_intensity"] = min_
+        elif stat == "max_intensity":
+            columns["max_intensity"] = max_
+        elif stat == "centroid":
+            for i, ax in enumerate(axis_names):
+                columns[f"centroid_{ax}"] = pos_sum[:, i] / count
+        elif stat == "weighted_centroid":
+            for i, ax in enumerate(axis_names):
+                columns[f"weighted_centroid_{ax}"] = wpos_sum[:, i] / sum_
+    return columns
+
+
+def _lazy_measure(
+    image: da.Array, labels: da.Array, ids: np.ndarray, stats: Sequence[str]
+) -> "dask.delayed.Delayed":
+    """Build the lazy chunk-map + single-merge graph for *stats*.
+
+    Parameters
+    ----------
+    image : da.Array
+        Intensity image, chunk-aligned with *labels*.
+    labels : da.Array
+        Integer label array.
+    ids : np.ndarray
+        Every non-background label id to produce a row for.
+    stats : sequence of str
+        Which stats to compute — see :data:`_STAT_WANTS`.
+
+    Returns
+    -------
+    dask.delayed.Delayed
+        Computes to the same ``dict[str, np.ndarray]`` shape
+        :func:`_merge_partials` returns. One delayed object, so
+        :func:`_compute_with_progress` sees one task graph: a map task per
+        chunk plus one final merge task — task count scales with chunk
+        count, not object count.
+    """
+    want = frozenset(w for s in stats for w in _STAT_WANTS[s])
+    need_intensity = bool(want & {"sum", "sumsq", "min", "max", "wpos_sum"})
+
+    label_blocks = labels.to_delayed().ravel()
+    image_blocks = (
+        image.to_delayed().ravel()
+        if need_intensity
+        else [None] * label_blocks.size
+    )
+    offsets = [
+        tuple(sl.start for sl in slc)
+        for slc in da.core.slices_from_chunks(labels.chunks)
+    ]
+
+    partials = [
+        delayed(_chunk_partial)(lbl, img, offset, want)
+        for lbl, img, offset in zip(label_blocks, image_blocks, offsets)
+    ]
+    return delayed(_merge_partials)(partials, ids, stats, labels.ndim)
+
+
 def iter_measure_labels(
     image: da.Array,
     labels: da.Array,
@@ -318,14 +568,16 @@ def iter_measure_labels(
 
     Notes
     -----
-    Every requested stat is built as a lazy dask array first, then computed
-    together in one ``dask.compute()`` call. Each
-    ``dask_image.ndmeasure`` function builds its own graph rooted at the
-    same ``image``/``labels`` chunks; computing them one at a time would
-    mean dask re-reads and re-decodes every chunk once *per stat* (4
-    default stats -> 4 full passes over the data). Computing them together
-    lets the scheduler recognize the shared chunk-read tasks and run each
-    one once, regardless of how many stats need it.
+    Every requested stat is aggregated together in one chunk-local map +
+    single-merge graph (see :func:`_lazy_measure`): each chunk is visited
+    once regardless of how many stats or ids are requested (one
+    ``scipy.ndimage`` call per stat-quantity per chunk, over only the ids
+    actually present there), then every chunk's small partial sums are
+    combined in one final numpy pass. Task count scales with chunk count,
+    not with object count — an earlier version wrapped
+    ``dask_image.ndmeasure``, which builds one task *per requested object
+    id* internally; for a huge object count that made the task graph
+    itself the bottleneck, independent of data size or I/O speed.
 
     Examples
     --------
@@ -357,8 +609,6 @@ def iter_measure_labels(
             f"unknown stats {sorted(unknown)}; choose from {available_stats()}"
         )
 
-    import dask_image.ndmeasure as ndm
-
     image, labels = _ensure_chunked(image, labels)
     nw = n_workers if n_workers is not None else min(4, os.cpu_count() or 1)
 
@@ -384,33 +634,17 @@ def iter_measure_labels(
     if ids.size == 0:
         return pd.DataFrame(index=pd.Index([], name="label"))
 
-    # Build every stat as a *lazy* dask array first, then compute them all
-    # together — see the Notes section above for why.
-    dummy = da.ones_like(image, dtype="float32")
-    lazy = {
-        stat: getattr(ndm, _STATS[stat][0])(
-            image if _STATS[stat][1] else dummy, labels, ids
-        )
-        for stat in stats
-    }
-    progress_gen = _compute_with_progress(list(lazy.values()), nw)
+    # One lazy chunk-map + single-merge graph for every requested stat
+    # together — see the Notes section above for why "together" matters.
+    graph = _lazy_measure(image, labels, ids, stats)
+    progress_gen = _compute_with_progress([graph], nw)
     phase = f"computing {len(stats)} measurement(s)"
     try:
         while True:
             done, total = next(progress_gen)
             yield done, total, phase
     except StopIteration as stop:
-        computed = stop.value
-
-    columns: dict[str, np.ndarray] = {}
-    for stat, result in zip(lazy.keys(), computed):
-        if result.ndim == 1:
-            columns[stat] = result
-        else:
-            # center_of_mass: one column per spatial axis
-            axis_names = "zyx"[-result.shape[1] :]
-            for i, ax in enumerate(axis_names):
-                columns[f"{stat}_{ax}"] = result[:, i]
+        (columns,) = stop.value
 
     table = pd.DataFrame(columns, index=pd.Index(ids, name="label"))
 

@@ -9,10 +9,13 @@ labelled images inside napari.
 
 `skimage.measure.regionprops` needs the full labelled + intensity array in
 RAM — fine for one tile, not for a hundred-thousand-object OME-ZARR volume.
-This plugin measures a `Labels` layer directly against an `Image` layer via
-[`dask-image`](https://image.dask.org)'s `ndmeasure`, working straight off
-the layers' backing dask/zarr arrays, chunk by chunk, without ever
-materializing the whole volume.
+This plugin measures a `Labels` layer directly against an `Image` layer,
+working straight off the layers' backing dask/zarr arrays: each chunk is
+aggregated locally (one `scipy.ndimage` call per chunk, over whichever
+object ids are actually inside it), then every chunk's small partial sums
+are merged in a single pass — without ever materializing the whole volume,
+and without task count scaling with object count (see *Keeping RAM and
+time bounded* below).
 
 ## Install
 
@@ -60,15 +63,18 @@ Two things matter for a huge volume, both handled automatically:
   already a well-chunked OME-ZARR pyramid is left untouched — rechunking an
   already-fine array is itself expensive (real data movement), not free
   insurance.
-- **One combined pass.** All requested stats are computed together in a
-  single `dask.compute()` call, not one at a time. Each `dask-image`
-  measurement function builds its own graph over the same image/labels
-  chunks; computing them separately means every chunk gets read and decoded
-  once *per stat* (4 default stats = 4 full passes over the data). Computing
-  them together lets dask's scheduler share the chunk-read work across all
-  of them. Progress is reported per dask task within each of the two
-  phases (scanning, then computing) — real counts from the running
-  computation, not a fixed per-stat tick.
+- **Chunk-local aggregation, not per-object tasks.** Every chunk is visited
+  once per stat-computation phase, regardless of how many objects or stats
+  are requested: one `scipy.ndimage` call per chunk computes partial sums
+  (count, sum, min, max, position sums, …) for whichever ids are actually
+  present in that chunk, then all chunks' partial sums are merged in a
+  single final pass. Task count scales with chunk count, not object count —
+  an earlier version wrapped `dask-image`'s `ndmeasure`, which builds one
+  task *per requested object id*; for a dataset with 100k+ objects that
+  made the task graph itself the bottleneck, independent of data size.
+  Progress is reported per dask task within each of the two phases
+  (scanning, then computing) — real counts from the running computation,
+  not a fixed per-stat tick.
 - **Skipping the scan.** If the Labels layer came from
   [patchworks](https://github.com/imcf/patchworks)'s `view_in_napari(...)`
   with `sequential_labels=True` at merge time, the layer carries a
