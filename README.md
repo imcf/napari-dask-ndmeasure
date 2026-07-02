@@ -28,10 +28,11 @@ pip install napari-dask-ndmeasure
    measurements come out in µm — not just pixels).
 2. `Plugins → Dask ndmeasure → Measure (dask-image)`.
 3. Pick the Image and Labels layer, check the measurements you want, hit
-   **Measure**. A progress bar tracks which stat is currently computing; the
-   UI stays responsive throughout (measurement runs in a background thread).
-4. Browse the table in the dock widget, or **Save CSV…** (defaults to
-   `<labels layer name>_measurements.csv`).
+   **Measure**. The UI stays responsive throughout (runs in a background
+   thread) with a progress bar; every measurement is also written to CSV
+   automatically (no dialog) — see *Output* below.
+4. Browse the table in the dock widget, or **Save CSV…** to pick a different
+   location (which then becomes the target for future automatic saves too).
 
 The measured table is also written to the Labels layer's `.features`, so you
 can immediately color the layer by any measured value via napari's built-in
@@ -41,11 +42,39 @@ Re-clicking **Measure** with the same layers/level/stats is instant — results
 are cached for the session (in memory; cleared when the widget/viewer
 closes).
 
-Every array is rechunked to a bounded size before measuring, regardless of
-how the layer was loaded — a plain numpy-backed layer (or any dask array
-that isn't already sensibly chunked) would otherwise become **one giant
-chunk**, silently forcing the whole volume into RAM during computation. This
-is what actually made the out-of-core promise real for non-pyramid layers.
+### Output
+
+Every successful measurement is written to CSV automatically, no dialog:
+`<save folder>/<labels layer name>_measurements.csv`, where the save folder
+is the last one you picked via **Save CSV…**, or the current working
+directory if you never have.
+
+### Keeping RAM and time bounded
+
+Two things matter for a huge volume, both handled automatically:
+
+- **Chunking.** Every array is rechunked to a bounded size before measuring
+  *only if it needs it* — a plain numpy-backed layer (or any dask array that
+  isn't already sensibly chunked) would otherwise become **one giant
+  chunk**, silently forcing the whole volume into RAM. A layer that's
+  already a well-chunked OME-ZARR pyramid is left untouched — rechunking an
+  already-fine array is itself expensive (real data movement), not free
+  insurance.
+- **One combined pass.** All requested stats are computed together in a
+  single `dask.compute()` call, not one at a time. Each `dask-image`
+  measurement function builds its own graph over the same image/labels
+  chunks; computing them separately means every chunk gets read and decoded
+  once *per stat* (4 default stats = 4 full passes over the data). Computing
+  them together lets dask's scheduler share the chunk-read work across all
+  of them. The trade-off: progress reporting is two coarse phases (scanning,
+  then computing) rather than one tick per stat — the fine-grained version
+  needed the separate, slower calls to work.
+
+The **Workers** spin box controls how many threads that combined computation
+uses (default `min(4, cpu count)`). More workers can mean more decoded
+chunks held in memory at once — turn it down (even to 1) if a measurement is
+still using too much RAM; turn it up if you have RAM to spare and want it
+faster.
 
 ## Measurements
 

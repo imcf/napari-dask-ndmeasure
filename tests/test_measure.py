@@ -3,6 +3,8 @@ import numpy as np
 import pytest
 
 from napari_dask_ndmeasure._measure import (
+    _ensure_chunked,
+    _needs_rechunk,
     available_stats,
     iter_measure_labels,
     measure_labels,
@@ -81,13 +83,48 @@ def test_available_stats_matches_measure_labels_options():
     assert not table.empty
 
 
-def test_measure_labels_rechunks_a_single_giant_chunk():
+def test_measure_labels_rechunks_a_pathologically_huge_single_chunk():
     # A bare numpy array, wrapped naively, becomes ONE chunk covering the
-    # whole array -> dask_image.ndmeasure would then need the whole thing in
-    # RAM. measure_labels must rechunk internally regardless.
+    # whole array. For a genuinely huge layer that's the RAM-blowup bug
+    # (dask_image.ndmeasure then needs the whole thing in RAM). Use a lazy
+    # da.zeros of realistic size instead of a real numpy array -> no RAM used
+    # by the test itself, but the single-chunk pathology is real.
+    huge_labels = da.zeros(
+        (37716, 27277, 115), dtype="int32", chunks=(37716, 27277, 115)
+    )
+    huge_image = da.zeros(
+        (37716, 27277, 115), dtype="float32", chunks=(37716, 27277, 115)
+    )
+    assert huge_labels.numblocks == (1, 1, 1)  # precondition: single chunk
+    assert _needs_rechunk(huge_labels)
+
+    image, labels = _ensure_chunked(huge_image, huge_labels)
+    assert labels.numblocks != (1, 1, 1)
+    assert image.chunks == labels.chunks
+
+
+def test_measure_labels_leaves_already_chunked_arrays_alone():
+    # Regression test: an earlier version unconditionally rechunked even
+    # well-chunked arrays (e.g. a real OME-ZARR pyramid layer), which was
+    # itself a RAM/perf regression — real data movement + a denser task
+    # graph for no reason. A sanely-chunked array must come back untouched.
+    image = da.zeros((16, 1024, 1024), dtype="float32", chunks=(16, 1024, 1024))
+    labels = da.zeros((16, 1024, 1024), dtype="int32", chunks=(16, 1024, 1024))
+    assert not _needs_rechunk(labels)
+    assert not _needs_rechunk(image)
+
+    out_image, out_labels = _ensure_chunked(image, labels)
+    assert out_image.chunks == image.chunks
+    assert out_labels.chunks == labels.chunks
+
+
+def test_measure_labels_small_single_chunk_input_still_correct():
+    # Small arrays are legitimately fine as a single chunk (well under the
+    # rechunk threshold) — measure_labels must still work correctly, it
+    # just won't (and shouldn't) trigger a rechunk.
     img = da.asarray(np.arange(400 * 400, dtype="float32").reshape(400, 400))
     lab = da.asarray(np.ones((400, 400), dtype="int32"))
-    assert img.numblocks == (1, 1)  # sanity: reproduces the bug precondition
+    assert not _needs_rechunk(lab)
 
     table = measure_labels(img, lab, stats=("area",))
     assert table.loc[1, "area"] == 400 * 400
@@ -104,12 +141,18 @@ def _drain(gen):
 
 
 def test_iter_measure_labels_yields_progress_then_returns_table():
+    # All requested stats are now computed together in one dask.compute()
+    # call (see the Notes in iter_measure_labels' docstring for why), so
+    # progress is two coarse, indeterminate (total=0) phase markers rather
+    # than one per stat.
     img, lab = _synthetic()
     gen = iter_measure_labels(img, lab, stats=("area", "mean_intensity"))
     progress, table = _drain(gen)
 
-    assert [p[:2] for p in progress] == [(1, 2), (2, 2)]
-    assert [p[2] for p in progress] == ["area", "mean_intensity"]
+    assert progress == [
+        (0, 0, "scanning for objects"),
+        (0, 0, "computing 2 measurement(s)"),
+    ]
     assert table.loc[1, "area"] == 4
 
 
@@ -118,3 +161,12 @@ def test_iter_measure_labels_return_value_matches_measure_labels():
     _, table_from_iter = _drain(iter_measure_labels(img, lab))
     table_from_wrapper = measure_labels(img, lab)
     assert table_from_iter.equals(table_from_wrapper)
+
+
+def test_measure_labels_n_workers_does_not_change_result():
+    # n_workers only bounds concurrency for the combined compute() call —
+    # correctness must not depend on it.
+    img, lab = _synthetic()
+    table_1 = measure_labels(img, lab, stats=available_stats(), n_workers=1)
+    table_4 = measure_labels(img, lab, stats=available_stats(), n_workers=4)
+    assert table_1.equals(table_4)

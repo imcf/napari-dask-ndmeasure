@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from qtpy.QtCore import Qt
@@ -42,6 +44,11 @@ class MeasureWidget(QWidget):
     Works directly on the layers' backing dask arrays — never pulls a
     hundred-thousand-object volume into RAM the way
     ``skimage.measure.regionprops`` would.
+
+    Every successful measurement (fresh or cached) is written to CSV
+    automatically, with no save dialog — see :meth:`_auto_save_csv`. Use
+    **Save CSV…** to choose a different location; that location is then
+    remembered for subsequent automatic saves too.
     """
 
     def __init__(self, napari_viewer: "napari.viewer.Viewer"):
@@ -60,6 +67,10 @@ class MeasureWidget(QWidget):
         # keyed by (zarr store path, component, level, stats) if cross-
         # session reuse on very expensive measurements is ever needed.
         self._cache: dict[tuple, "pd.DataFrame"] = {}
+        # Where auto-save (see _on_measured) writes CSVs. None -> cwd, until
+        # the user manually picks a location once via "Save CSV…", which is
+        # remembered for subsequent auto-saves too.
+        self._save_dir: Path | None = None
 
         layout = QVBoxLayout()
         self.setLayout(layout)
@@ -106,6 +117,20 @@ class MeasureWidget(QWidget):
             self.stats_list.addItem(item)
         stats_layout.addWidget(self.stats_list)
         layout.addWidget(stats_box)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Workers:"))
+        self.workers_spin = QSpinBox()
+        self.workers_spin.setMinimum(1)
+        self.workers_spin.setMaximum(max(1, os.cpu_count() or 1))
+        self.workers_spin.setValue(min(4, os.cpu_count() or 1))
+        self.workers_spin.setToolTip(
+            "Threads for the measurement. More = faster, but more decoded "
+            "chunks held in memory at once. Lower this (even to 1) if "
+            "measuring uses too much RAM."
+        )
+        row.addWidget(self.workers_spin)
+        layout.addLayout(row)
 
         self.measure_btn = QPushButton("Measure")
         self.measure_btn.clicked.connect(self._on_measure_clicked)
@@ -204,14 +229,24 @@ class MeasureWidget(QWidget):
 
         self.measure_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, len(stats))
-        self.progress_bar.setValue(0)
+        # min == max is Qt's native "busy" (indeterminate) mode — start here
+        # rather than a determinate 0/N, since the first real work
+        # (iter_measure_labels' whole-volume object scan) has no natural
+        # sub-progress and can take a while on a huge volume; a literal 0/N
+        # bar would look frozen for that whole stretch.
+        self.progress_bar.setRange(0, 0)
         self.status_label.setText("Measuring…")
+
+        n_workers = self.workers_spin.value()
 
         @thread_worker
         def _run():
             result = yield from iter_measure_labels(
-                image_data, labels_data, stats=stats, scale=scale
+                image_data,
+                labels_data,
+                stats=stats,
+                scale=scale,
+                n_workers=n_workers,
             )
             return result
 
@@ -235,9 +270,16 @@ class MeasureWidget(QWidget):
             :func:`napari_dask_ndmeasure._measure.iter_measure_labels`.
         """
         done, total, stat_name = progress
-        self.progress_bar.setMaximum(total)
+        self.progress_bar.setMaximum(
+            total
+        )  # total=0 -> indeterminate (Qt: min==max)
         self.progress_bar.setValue(done)
-        self.status_label.setText(f"Measuring… {stat_name} ({done}/{total})")
+        if total == 0:
+            self.status_label.setText(f"Measuring… {stat_name}…")
+        else:
+            self.status_label.setText(
+                f"Measuring… {stat_name} ({done}/{total})"
+            )
 
     def _on_measure_error(self, exc: Exception):
         self.measure_btn.setEnabled(True)
@@ -271,9 +313,14 @@ class MeasureWidget(QWidget):
             self._cache[cache_key] = table
         self._table = table
         suffix = " (cached)" if from_cache else ""
-        self.status_label.setText(f"{len(table)} objects measured.{suffix}")
+        status = f"{len(table)} objects measured.{suffix}"
         self._populate_table(table)
         self.save_btn.setEnabled(not table.empty)
+
+        if not table.empty:
+            saved_to = self._auto_save_csv(table)
+            status += f" Saved to {saved_to}."
+        self.status_label.setText(status)
 
         _, labels_layer = self._selected_layers()
         if labels_layer is not None and not table.empty:
@@ -281,6 +328,26 @@ class MeasureWidget(QWidget):
             features = table.reset_index()
             features["label"] = features["label"].astype(int)
             labels_layer.features = features
+
+    def _auto_save_csv(self, table: "pd.DataFrame") -> Path:
+        """Write *table* to CSV without prompting, every time a measurement finishes.
+
+        Parameters
+        ----------
+        table : pandas.DataFrame
+            The measurement result to save.
+
+        Returns
+        -------
+        Path
+            Where it was written: :attr:`_save_dir` (the last manually
+            chosen "Save CSV…" directory) if set, else the current working
+            directory, using :meth:`_default_csv_name`.
+        """
+        directory = self._save_dir or Path.cwd()
+        path = directory / self._default_csv_name()
+        table.to_csv(path)
+        return path
 
     def _populate_table(self, table):
         self.results_table.clear()
@@ -309,7 +376,11 @@ class MeasureWidget(QWidget):
         return f"{stem}_measurements.csv"
 
     def _on_save_clicked(self) -> None:
-        """Prompt for a path and write the last measurement table as CSV."""
+        """Prompt for a path, write the CSV there, and remember the folder.
+
+        The chosen folder becomes the target for future automatic saves
+        (see :meth:`_auto_save_csv`) too, instead of the default cwd.
+        """
         if self._table is None or self._table.empty:
             return
         path, _ = QFileDialog.getSaveFileName(
@@ -317,6 +388,7 @@ class MeasureWidget(QWidget):
         )
         if path:
             self._table.to_csv(path)
+            self._save_dir = Path(path).parent
 
 
 def _restore(combo: QComboBox, previous: str) -> None:

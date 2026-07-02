@@ -34,10 +34,11 @@ def test_widget_populates_layer_choices(make_napari_viewer):
     ] == ["labels"]
 
 
-def test_widget_measure_end_to_end(qtbot, make_napari_viewer):
+def test_widget_measure_end_to_end(qtbot, make_napari_viewer, tmp_path):
     viewer = make_napari_viewer()
     _add_layers(viewer)
     widget = MeasureWidget(viewer)
+    widget._save_dir = tmp_path  # keep the auto-save CSV out of the repo
 
     widget._on_measure_clicked()
     qtbot.waitUntil(lambda: widget._table is not None, timeout=5000)
@@ -46,8 +47,8 @@ def test_widget_measure_end_to_end(qtbot, make_napari_viewer):
     assert list(widget._table.index) == [1, 2]
     assert widget.results_table.rowCount() == 2
     assert widget.save_btn.isEnabled()
-    # progress bar reached its max and got hidden again once done
-    assert widget.progress_bar.value() == widget.progress_bar.maximum()
+    # progress bar was indeterminate throughout (stats are now computed
+    # together, not one at a time) and got hidden again once done
     assert not widget.progress_bar.isVisible()
     assert "(cached)" not in widget.status_label.text()
 
@@ -55,12 +56,28 @@ def test_widget_measure_end_to_end(qtbot, make_napari_viewer):
     assert "area" in labels_layer.features.columns
 
 
+def test_widget_measure_auto_saves_csv(qtbot, make_napari_viewer, tmp_path):
+    viewer = make_napari_viewer()
+    _add_layers(viewer)
+    widget = MeasureWidget(viewer)
+    widget._save_dir = tmp_path
+
+    widget._on_measure_clicked()
+    qtbot.waitUntil(lambda: widget._table is not None, timeout=5000)
+
+    saved = tmp_path / "labels_measurements.csv"
+    assert saved.exists()
+    assert "area" in saved.read_text()
+    assert f"Saved to {saved}" in widget.status_label.text()
+
+
 def test_widget_measure_second_run_is_a_cache_hit(
-    qtbot, make_napari_viewer, monkeypatch
+    qtbot, make_napari_viewer, monkeypatch, tmp_path
 ):
     viewer = make_napari_viewer()
     _add_layers(viewer)
     widget = MeasureWidget(viewer)
+    widget._save_dir = tmp_path
 
     widget._on_measure_clicked()
     qtbot.waitUntil(lambda: widget._table is not None, timeout=5000)
@@ -101,20 +118,29 @@ def test_widget_default_csv_name_uses_labels_layer(make_napari_viewer):
     assert widget._default_csv_name() == "labels_measurements.csv"
 
 
-def test_widget_save_csv_writes_table(qtbot, make_napari_viewer, tmp_path):
+def test_widget_save_csv_writes_table_and_remembers_dir(
+    qtbot, make_napari_viewer, monkeypatch, tmp_path
+):
     viewer = make_napari_viewer()
     _add_layers(viewer)
     widget = MeasureWidget(viewer)
+    widget._save_dir = tmp_path  # keep the auto-save out of the repo
 
     widget._on_measure_clicked()
     qtbot.waitUntil(lambda: widget._table is not None, timeout=5000)
 
-    target = tmp_path / "out.csv"
-    widget._table.to_csv(
-        target
-    )  # exactly what _on_save_clicked does with a path
+    target = tmp_path / "manual" / "out.csv"
+    target.parent.mkdir()
+    monkeypatch.setattr(
+        "napari_dask_ndmeasure._widget.QFileDialog.getSaveFileName",
+        staticmethod(lambda *a, **k: (str(target), "CSV (*.csv)")),
+    )
+
+    widget._on_save_clicked()
+
     assert target.exists()
     assert "area" in target.read_text()
+    assert widget._save_dir == target.parent
 
 
 def test_widget_level_range_updates_for_multiscale(make_napari_viewer):
