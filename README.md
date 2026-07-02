@@ -69,10 +69,10 @@ Two things matter for a huge volume, both handled automatically:
   (count, sum, min, max, position sums, …) for whichever ids are actually
   present in that chunk, then all chunks' partial sums are merged in a
   single final pass. Task count scales with chunk count, not object count —
-  an earlier version wrapped `dask-image`'s `ndmeasure`, which builds one
-  task *per requested object id*; for a dataset with 100k+ objects that
-  made the task graph itself the bottleneck, independent of data size.
-  Progress is reported per dask task within each of the two phases
+  an earlier version of this plugin used a per-object-id design instead,
+  which built one task *per requested object id*; for a dataset with 100k+
+  objects that made the task graph itself the bottleneck, independent of
+  data size. Progress is reported per dask task within each of the two phases
   (scanning, then computing) — real counts from the running computation,
   not a fixed per-stat tick.
 - **Skipping the scan.** If the Labels layer came from

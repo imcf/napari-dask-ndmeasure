@@ -273,11 +273,12 @@ def _chunk_partial(
 ) -> "dict[str, np.ndarray] | None":
     """Aggregate one chunk's voxels into small per-local-id partial sums.
 
-    The fix for ``dask_image.ndmeasure``'s per-object-id task blowup: every
-    ``scipy.ndimage`` call here runs **once per chunk**, over whichever ids
-    are actually present in *that* chunk (typically a small fraction of the
-    total object count) — scipy already vectorizes internally over an
-    ``index=`` array, so there was never a need to call it once per id.
+    The fix for the per-object-id task blowup an earlier version of this
+    module had: every ``scipy.ndimage`` call here runs **once per chunk**,
+    over whichever ids are actually present in *that* chunk (typically a
+    small fraction of the total object count) — scipy already vectorizes
+    internally over an ``index=`` array, so there was never a need to call
+    it once per id.
 
     Parameters
     ----------
@@ -574,10 +575,10 @@ def iter_measure_labels(
     ``scipy.ndimage`` call per stat-quantity per chunk, over only the ids
     actually present there), then every chunk's small partial sums are
     combined in one final numpy pass. Task count scales with chunk count,
-    not with object count — an earlier version wrapped
-    ``dask_image.ndmeasure``, which builds one task *per requested object
-    id* internally; for a huge object count that made the task graph
-    itself the bottleneck, independent of data size or I/O speed.
+    not with object count — an earlier version of this module built one
+    task *per requested object id* internally; for a huge object count
+    that made the task graph itself the bottleneck, independent of data
+    size or I/O speed.
 
     Examples
     --------

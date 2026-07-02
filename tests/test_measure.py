@@ -88,9 +88,9 @@ def test_available_stats_matches_measure_labels_options():
 def test_measure_labels_rechunks_a_pathologically_huge_single_chunk():
     # A bare numpy array, wrapped naively, becomes ONE chunk covering the
     # whole array. For a genuinely huge layer that's the RAM-blowup bug
-    # (dask_image.ndmeasure then needs the whole thing in RAM). Use a lazy
-    # da.zeros of realistic size instead of a real numpy array -> no RAM used
-    # by the test itself, but the single-chunk pathology is real.
+    # (the per-chunk aggregation then needs the whole thing in RAM at once).
+    # Use a lazy da.zeros of realistic size instead of a real numpy array ->
+    # no RAM used by the test itself, but the single-chunk pathology is real.
     huge_labels = da.zeros(
         (37716, 27277, 115), dtype="int32", chunks=(37716, 27277, 115)
     )
@@ -173,13 +173,12 @@ def test_iter_measure_labels_yields_progress_then_returns_table():
 
 
 def test_lazy_measure_graph_scales_with_chunks_not_objects():
-    # The whole point of the map/merge rewrite: an earlier version wrapped
-    # dask_image.ndmeasure, whose labeled_comprehension builds one task
-    # *per requested object id* (times every chunk) — for a high object
-    # count that made the task graph itself the bottleneck. The new engine
-    # builds one map task per chunk (regardless of how many ids are inside
-    # it) plus one merge task, so graph size must track chunk count, not
-    # object count, even with thousands of objects.
+    # The whole point of the map/merge rewrite: an earlier version built
+    # one task *per requested object id* (times every chunk) — for a high
+    # object count that made the task graph itself the bottleneck. The new
+    # engine builds one map task per chunk (regardless of how many ids are
+    # inside it) plus one merge task, so graph size must track chunk count,
+    # not object count, even with thousands of objects.
     n_objects = 2000
     size, chunk = 400, 40  # 10x10 = 100 chunks
     rng = np.random.default_rng(0)
