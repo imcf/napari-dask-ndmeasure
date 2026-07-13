@@ -234,6 +234,13 @@ class MeasureWidget(QWidget):
         self._viewer.layers.events.inserted.connect(self._refresh_layer_choices)
         self._viewer.layers.events.removed.connect(self._refresh_layer_choices)
         self.labels_combo.currentIndexChanged.connect(self._update_level_range)
+        # On the viewer, not the Labels layer: a layer's own mouse_drag_
+        # callbacks only fire while it's napari's *active* layer (see
+        # napari/_vispy/canvas.py), so clicking the image would silently do
+        # nothing whenever some other layer happened to be selected in the
+        # layers list. The viewer's callbacks fire unconditionally; we look
+        # up the current Labels selection ourselves inside the handler.
+        self._viewer.mouse_drag_callbacks.append(self._on_image_clicked)
         self._refresh_layer_choices()
 
     def _update_level_range(self):
@@ -540,18 +547,12 @@ class MeasureWidget(QWidget):
     def _wire_labels_features(
         self, labels_layer, table: "pd.DataFrame"
     ) -> None:
-        """Feed *table* into the Labels layer's per-label features/coloring.
-
-        Also registers :meth:`_on_image_clicked` (image-click -> table-row
-        selection) on the layer once, if not already there.
-        """
+        """Feed *table* into the Labels layer's per-label features/coloring."""
         if labels_layer is None or table.empty:
             return
         features = table.reset_index()
         features["label"] = features["label"].astype(int)
         labels_layer.features = features
-        if self._on_image_clicked not in labels_layer.mouse_drag_callbacks:
-            labels_layer.mouse_drag_callbacks.append(self._on_image_clicked)
 
     def _auto_save_csv(self, table: "pd.DataFrame") -> Path:
         """Write *table* to CSV without prompting, every time a measurement finishes.
@@ -789,17 +790,22 @@ class MeasureWidget(QWidget):
         padding = 6  # object spans roughly 1/padding of the shorter canvas edge
         self._viewer.camera.zoom = canvas_px / (linear_size * padding)
 
-    def _on_image_clicked(self, layer, event) -> None:
+    def _on_image_clicked(self, viewer, event) -> None:
         """Clicking a labelled object in the image selects its table row
         (replacing any existing selection) — the row-selection handler
         (:meth:`_on_result_selection_changed`) then applies the highlight.
 
-        Registered as a ``mouse_drag_callbacks`` entry on the Labels layer
-        (see :meth:`_on_measured`) — napari calls it with the layer and the
-        click event on every press, regardless of the layer's paint/pick
-        mode.
+        Registered on the *viewer's* ``mouse_drag_callbacks`` (see
+        :meth:`__init__`), not the Labels layer's — a layer's own callbacks
+        only fire while it's napari's active layer, which broke this
+        entirely whenever some other layer was selected in the layers list.
+        Looks up the current Labels selection itself instead of trusting
+        napari's active-layer state.
         """
-        value = layer.get_value(
+        _, labels_layer = self._selected_layers()
+        if labels_layer is None:
+            return
+        value = labels_layer.get_value(
             event.position,
             view_direction=event.view_direction,
             dims_displayed=event.dims_displayed,

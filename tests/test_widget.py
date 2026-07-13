@@ -372,7 +372,11 @@ def test_widget_image_click_selects_table_row(
     labels_layer = viewer.layers["labels"]
     monkeypatch.setattr(labels_layer, "get_value", lambda *a, **k: 2)
 
-    widget._on_image_clicked(labels_layer, _FakeClickEvent())
+    # first arg (would be napari's "active" layer/viewer) is irrelevant --
+    # _on_image_clicked resolves the Labels layer from our own combo, not
+    # from napari's active-layer state (see docstring: that state is what
+    # made clicking the image silently do nothing before this fix).
+    widget._on_image_clicked(None, _FakeClickEvent())
 
     assert (
         widget.results_table.item(widget.results_table.currentRow(), 0).text()
