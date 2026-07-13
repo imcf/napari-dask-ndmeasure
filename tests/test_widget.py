@@ -304,8 +304,17 @@ def test_widget_row_click_jumps_z_slice_for_3d_labels(
 def test_widget_multi_select_highlights_and_clear_restores(
     qtbot, make_napari_viewer, tmp_path
 ):
+    # 3 objects, not 2 -- so a selection covering only some of them has an
+    # actual "unselected but known" label (3) to check stays dim. A 2-object
+    # dataset can't catch a regression where every *known* label ends up
+    # highlighted (only unknown/background would be dim, masking the bug).
     viewer = make_napari_viewer()
-    _add_layers(viewer)
+    lab = np.array(
+        [[1, 1, 2, 2], [1, 1, 2, 2], [3, 3, 0, 0], [3, 3, 0, 0]],
+        dtype="int32",
+    )
+    viewer.add_image(np.zeros((4, 4), dtype="float32"), name="image")
+    viewer.add_labels(lab, name="labels")
     widget = MeasureWidget(viewer)
     widget._save_dir = tmp_path
 
@@ -316,15 +325,18 @@ def test_widget_multi_select_highlights_and_clear_restores(
     original_colormap = labels_layer.colormap
     assert not widget.clear_selection_btn.isEnabled()
 
-    widget.results_table.item(0, 0).setSelected(True)
-    widget.results_table.item(1, 0).setSelected(True)
+    widget.results_table.item(0, 0).setSelected(True)  # label 1
+    widget.results_table.item(1, 0).setSelected(True)  # label 2
 
     assert widget.clear_selection_btn.isEnabled()
     assert labels_layer.colormap is not original_colormap
-    color_dict = labels_layer.colormap.color_dict
-    assert color_dict[1][0] == 1.0  # label 1 highlighted (yellow -> R=1)
-    assert color_dict[2][0] == 1.0  # label 2 highlighted too
-    assert color_dict[None][0] == 0.3  # everything else dimmed
+    # check the actual rendered colors, not just the color_dict structure --
+    # the original bug was the dict looking right but the render being wrong.
+    rendered = labels_layer.colormap.map(lab)
+    assert rendered[0, 0][0] == 1.0  # label 1 highlighted (yellow -> R=1)
+    assert rendered[0, 2][0] == 1.0  # label 2 highlighted too
+    assert tuple(rendered[2, 0]) == (0.3, 0.3, 0.3, 0.15)  # label 3: dim
+    assert tuple(rendered[2, 2]) == (0.0, 0.0, 0.0, 0.0)  # background
 
     widget._on_clear_selection_clicked()
 

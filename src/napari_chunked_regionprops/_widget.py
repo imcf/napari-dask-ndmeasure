@@ -721,11 +721,19 @@ class MeasureWidget(QWidget):
 
         highlight = np.array([1.0, 1.0, 0.0, 1.0], dtype="float32")
         dim = np.array([0.3, 0.3, 0.3, 0.15], dtype="float32")
-        color_dict = {label_id: highlight for label_id in label_ids}
+        # Explicit per-label entry for every known object, rather than
+        # relying on DirectLabelColormap's `None`-key fallback for
+        # "everything else" — that fallback wasn't reliably dimming
+        # unselected objects in practice (they all rendered highlighted).
+        color_dict = {
+            int(label_id): (highlight if label_id in label_ids else dim)
+            for label_id in self._table.index
+        }
         color_dict[0] = np.array([0.0, 0.0, 0.0, 0.0], dtype="float32")
-        color_dict[None] = (
-            dim  # DirectLabelColormap's fallback for any id not listed
-        )
+        # Safety net for any id not in the table (shouldn't happen, but a
+        # stale/mismatched ids hint could produce one) -- dim rather than
+        # napari's own default of fully transparent for unlisted keys.
+        color_dict[None] = dim
         labels_layer.colormap = DirectLabelColormap(color_dict=color_dict)
 
     def _on_clear_selection_clicked(self) -> None:
