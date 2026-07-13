@@ -811,6 +811,13 @@ class MeasureWidget(QWidget):
             dims_displayed=event.dims_displayed,
             world=True,
         )
+        # Multiscale layers return (value, level) instead of a bare value —
+        # this plugin is built around pyramids, so that's the common case,
+        # not an edge case. int(value) on the tuple used to raise and get
+        # silently swallowed, which looked exactly like "clicking does
+        # nothing" even with the Labels layer active.
+        if isinstance(value, tuple):
+            value = value[0]
         if not value:
             return
         target = str(int(value))

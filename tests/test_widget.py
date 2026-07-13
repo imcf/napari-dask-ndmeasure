@@ -388,6 +388,39 @@ def test_widget_image_click_selects_table_row(
     assert labels_layer.colormap.color_dict[2][0] == 1.0
 
 
+def test_widget_image_click_handles_multiscale_tuple_return(
+    qtbot, make_napari_viewer, monkeypatch, tmp_path
+):
+    """Multiscale layers' get_value() returns (value, level), not a bare
+    value -- int() on that tuple used to raise and get silently swallowed,
+    which looked exactly like clicking doing nothing."""
+    viewer = make_napari_viewer()
+    lab0 = da.from_array(
+        np.array(
+            [[1, 1, 0, 0], [1, 1, 0, 0], [0, 0, 2, 2], [0, 0, 2, 2]],
+            dtype="int32",
+        )
+    )
+    lab1 = da.from_array(np.zeros((2, 2), dtype="int32"))
+    viewer.add_labels([lab0, lab1], name="labels", multiscale=True)
+    viewer.add_image(np.zeros((4, 4), dtype="float32"), name="image")
+    widget = MeasureWidget(viewer)
+    widget._save_dir = tmp_path
+
+    widget._on_measure_clicked()
+    qtbot.waitUntil(lambda: widget._table is not None, timeout=5000)
+
+    labels_layer = viewer.layers["labels"]
+    monkeypatch.setattr(labels_layer, "get_value", lambda *a, **k: (2, 0))
+
+    widget._on_image_clicked(None, _FakeClickEvent())
+
+    assert (
+        widget.results_table.item(widget.results_table.currentRow(), 0).text()
+        == "2"
+    )
+
+
 def test_widget_reload_csv_from_path(
     qtbot, make_napari_viewer, monkeypatch, tmp_path
 ):
