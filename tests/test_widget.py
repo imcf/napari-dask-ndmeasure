@@ -250,3 +250,52 @@ def test_widget_level_range_updates_for_multiscale(make_napari_viewer):
     widget = MeasureWidget(viewer)
     widget.labels_combo.setCurrentText("pyramid_labels")
     assert widget.level_spin.maximum() == 1
+
+
+def test_widget_row_click_selects_label_in_image(qtbot, make_napari_viewer, tmp_path):
+    viewer = make_napari_viewer()
+    _add_layers(viewer)
+    widget = MeasureWidget(viewer)
+    widget._save_dir = tmp_path
+
+    widget._on_measure_clicked()
+    qtbot.waitUntil(lambda: widget._table is not None, timeout=5000)
+
+    widget._on_result_row_clicked(1, 0)  # second row -> label 2
+
+    labels_layer = viewer.layers["labels"]
+    assert labels_layer.selected_label == 2
+    assert labels_layer.show_selected_label is True
+
+
+class _FakeClickEvent:
+    """Minimal stand-in for napari's mouse-click event object.
+
+    Only the attributes ``_on_image_clicked`` reads; the values are
+    irrelevant here since ``get_value`` itself is monkeypatched in the
+    test that uses this.
+    """
+
+    position = (0, 0)
+    view_direction = None
+    dims_displayed = (0, 1)
+
+
+def test_widget_image_click_selects_table_row(
+    qtbot, make_napari_viewer, monkeypatch, tmp_path
+):
+    viewer = make_napari_viewer()
+    _add_layers(viewer)
+    widget = MeasureWidget(viewer)
+    widget._save_dir = tmp_path
+
+    widget._on_measure_clicked()
+    qtbot.waitUntil(lambda: widget._table is not None, timeout=5000)
+
+    labels_layer = viewer.layers["labels"]
+    monkeypatch.setattr(labels_layer, "get_value", lambda *a, **k: 2)
+
+    widget._on_image_clicked(labels_layer, _FakeClickEvent())
+
+    assert labels_layer.selected_label == 2
+    assert widget.results_table.item(widget.results_table.currentRow(), 0).text() == "2"

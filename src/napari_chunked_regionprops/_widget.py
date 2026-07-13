@@ -183,6 +183,7 @@ class MeasureWidget(QWidget):
         layout.addWidget(self.status_label)
 
         self.results_table = QTableWidget()
+        self.results_table.cellClicked.connect(self._on_result_row_clicked)
         layout.addWidget(self.results_table)
 
         self.save_btn = QPushButton("Save CSV…")
@@ -401,11 +402,21 @@ class MeasureWidget(QWidget):
         self.status_label.setText(status)
 
         _, labels_layer = self._selected_layers()
-        if labels_layer is not None and not table.empty:
-            # feeds napari's built-in per-label feature display/coloring.
-            features = table.reset_index()
-            features["label"] = features["label"].astype(int)
-            labels_layer.features = features
+        self._wire_labels_features(labels_layer, table)
+
+    def _wire_labels_features(self, labels_layer, table: "pd.DataFrame") -> None:
+        """Feed *table* into the Labels layer's per-label features/coloring.
+
+        Also registers :meth:`_on_image_clicked` (image-click -> table-row
+        selection) on the layer once, if not already there.
+        """
+        if labels_layer is None or table.empty:
+            return
+        features = table.reset_index()
+        features["label"] = features["label"].astype(int)
+        labels_layer.features = features
+        if self._on_image_clicked not in labels_layer.mouse_drag_callbacks:
+            labels_layer.mouse_drag_callbacks.append(self._on_image_clicked)
 
     def _auto_save_csv(self, table: "pd.DataFrame") -> Path:
         """Write *table* to CSV without prompting, every time a measurement finishes.
@@ -491,6 +502,43 @@ class MeasureWidget(QWidget):
                 self.results_table.setItem(
                     row, col, QTableWidgetItem(f"{value:.4g}")
                 )
+
+    def _on_result_row_clicked(self, row: int, column: int) -> None:
+        """Clicking a results-table row highlights that object in the image."""
+        item = self.results_table.item(row, 0)
+        if item is None:
+            return
+        _, labels_layer = self._selected_layers()
+        if labels_layer is None:
+            return
+        labels_layer.selected_label = int(item.text())
+        labels_layer.show_selected_label = True
+
+    def _on_image_clicked(self, layer, event) -> None:
+        """Clicking a labelled object in the image selects its table row.
+
+        Registered as a ``mouse_drag_callbacks`` entry on the Labels layer
+        (see :meth:`_on_measured`) — napari calls it with the layer and the
+        click event on every press, regardless of the layer's paint/pick
+        mode.
+        """
+        value = layer.get_value(
+            event.position,
+            view_direction=event.view_direction,
+            dims_displayed=event.dims_displayed,
+            world=True,
+        )
+        if not value:
+            return
+        layer.selected_label = int(value)
+        layer.show_selected_label = True
+        target = str(int(value))
+        for row in range(self.results_table.rowCount()):
+            item = self.results_table.item(row, 0)
+            if item is not None and item.text() == target:
+                self.results_table.setCurrentCell(row, 0)
+                self.results_table.scrollToItem(item)
+                break
 
     def _default_csv_name(self) -> str:
         """Suggested CSV filename, derived from the selected Labels layer.
