@@ -263,11 +263,18 @@ def test_widget_row_click_selects_label_in_image(
     widget._on_measure_clicked()
     qtbot.waitUntil(lambda: widget._table is not None, timeout=5000)
 
+    default_center = tuple(viewer.camera.center)
+    default_zoom = viewer.camera.zoom
+
     widget._on_result_row_clicked(1, 0)  # second row -> label 2
 
     labels_layer = viewer.layers["labels"]
     assert labels_layer.selected_label == 2
     assert labels_layer.show_selected_label is True
+    # camera actually moved/zoomed onto the object, not left untouched --
+    # with tens of thousands of objects, just recoloring one is invisible.
+    assert tuple(viewer.camera.center) != default_center
+    assert viewer.camera.zoom != default_zoom
 
 
 class _FakeClickEvent:

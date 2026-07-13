@@ -540,15 +540,60 @@ class MeasureWidget(QWidget):
                 )
 
     def _on_result_row_clicked(self, row: int, column: int) -> None:
-        """Clicking a results-table row highlights that object in the image."""
+        """Clicking a results-table row highlights that object in the image
+        and centers/zooms the camera on it.
+
+        The zoom matters: with tens of thousands of objects in a volume,
+        just recoloring the selected label is invisible unless the camera
+        is already looking straight at it.
+        """
         item = self.results_table.item(row, 0)
         if item is None:
             return
         _, labels_layer = self._selected_layers()
         if labels_layer is None:
             return
-        labels_layer.selected_label = int(item.text())
+        label_id = int(item.text())
+        labels_layer.selected_label = label_id
         labels_layer.show_selected_label = True
+        self._center_camera_on_label(labels_layer, label_id)
+
+    def _center_camera_on_label(self, labels_layer, label_id: int) -> None:
+        """Center and zoom the camera on *label_id*'s object.
+
+        Needs the ``centroid`` and ``area`` stats to have been measured
+        (or reloaded) for this label — silently does nothing otherwise.
+
+        ponytail: "linear size" is a rough ``area ** (1/ndim)`` estimate
+        (voxel count -> a cube-root/sqrt length), not the object's real
+        bounding box, so very elongated objects won't be framed tightly.
+        Canvas size comes from the private ``_qt_viewer.canvas`` (no
+        public napari accessor for it) — upgrade path if that ever breaks
+        across a napari version bump.
+        """
+        if self._table is None or label_id not in self._table.index:
+            return
+        row = self._table.loc[label_id]
+        ndim = labels_layer.ndim
+        centroid_cols = [f"centroid_{ax}" for ax in "zyx"[-ndim:]]
+        if "area" not in row.index or not all(
+            c in row.index for c in centroid_cols
+        ):
+            return
+
+        world_coord = labels_layer.data_to_world(
+            [row[c] for c in centroid_cols]
+        )
+        self._viewer.camera.center = tuple(world_coord)
+
+        linear_size = row["area"] ** (1 / ndim) * np.mean(
+            labels_layer.scale[-ndim:]
+        )
+        if linear_size <= 0:
+            return
+        canvas_px = min(self._viewer.window._qt_viewer.canvas.size)
+        padding = 6  # object spans roughly 1/padding of the shorter canvas edge
+        self._viewer.camera.zoom = canvas_px / (linear_size * padding)
 
     def _on_image_clicked(self, layer, event) -> None:
         """Clicking a labelled object in the image selects its table row.
