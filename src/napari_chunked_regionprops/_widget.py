@@ -659,7 +659,8 @@ class MeasureWidget(QWidget):
         self._center_camera_on_label(labels_layer, label_id)
 
     def _center_camera_on_label(self, labels_layer, label_id: int) -> None:
-        """Center and zoom the camera on *label_id*'s object.
+        """Center and zoom the camera on *label_id*'s object, jumping to
+        its z-slice too if the labels array is 3D.
 
         Needs the ``centroid`` and ``area`` stats to have been measured
         (or reloaded) for this label — silently does nothing otherwise.
@@ -669,7 +670,10 @@ class MeasureWidget(QWidget):
         bounding box, so very elongated objects won't be framed tightly.
         Canvas size comes from the private ``_qt_viewer.canvas`` (no
         public napari accessor for it) — upgrade path if that ever breaks
-        across a napari version bump.
+        across a napari version bump. Z-slice jump only handles plain
+        ``(z, y, x)`` volumes (``ndim == 3``), matching the rest of this
+        module's dimensionality support — a 4th (e.g. time) axis isn't
+        stepped.
         """
         if self._table is None or label_id not in self._table.index:
             return
@@ -685,6 +689,12 @@ class MeasureWidget(QWidget):
             [row[c] for c in centroid_cols]
         )
         self._viewer.camera.center = tuple(world_coord)
+
+        if ndim == 3:
+            current_step = list(self._viewer.dims.current_step)
+            if len(current_step) >= 3:
+                current_step[-3] = int(round(row["centroid_z"]))
+                self._viewer.dims.current_step = current_step
 
         linear_size = row["area"] ** (1 / ndim) * np.mean(
             labels_layer.scale[-ndim:]

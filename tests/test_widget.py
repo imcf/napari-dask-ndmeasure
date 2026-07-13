@@ -268,6 +268,7 @@ def test_widget_row_click_selects_label_in_image(
 
     default_center = tuple(viewer.camera.center)
     default_zoom = viewer.camera.zoom
+    default_step = tuple(viewer.dims.current_step)
 
     widget._on_result_row_clicked(1, 0)  # second row -> label 2
 
@@ -278,6 +279,29 @@ def test_widget_row_click_selects_label_in_image(
     # with tens of thousands of objects, just recoloring one is invisible.
     assert tuple(viewer.camera.center) != default_center
     assert viewer.camera.zoom != default_zoom
+    # 2D test data has no z axis (ndim == 2) -> current_step untouched.
+    assert tuple(viewer.dims.current_step) == default_step
+
+
+def test_widget_row_click_jumps_z_slice_for_3d_labels(
+    qtbot, make_napari_viewer, tmp_path
+):
+    viewer = make_napari_viewer()
+    img = np.arange(2 * 4 * 4, dtype="float32").reshape(2, 4, 4)
+    lab = np.zeros((2, 4, 4), dtype="int32")
+    lab[1, 2:, 2:] = 1  # label 1 only exists on z-slice 1
+    viewer.add_image(img, name="image")
+    viewer.add_labels(lab, name="labels")
+    widget = MeasureWidget(viewer)
+    widget._save_dir = tmp_path
+
+    widget._on_measure_clicked()
+    qtbot.waitUntil(lambda: widget._table is not None, timeout=5000)
+
+    viewer.dims.current_step = (0, 0, 0)
+    widget._on_result_row_clicked(0, 0)  # only row -> label 1
+
+    assert viewer.dims.current_step[0] == 1
 
 
 class _FakeClickEvent:
