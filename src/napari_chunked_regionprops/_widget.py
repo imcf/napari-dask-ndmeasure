@@ -287,7 +287,13 @@ class MeasureWidget(QWidget):
             return
 
         disk_key = self._disk_cache_key(
-            image_layer, labels_layer, image_data, labels_data, level, stats, scale
+            image_layer,
+            labels_layer,
+            image_data,
+            labels_data,
+            level,
+            stats,
+            scale,
         )
         disk_entry = self._load_disk_cache().get(disk_key)
         if disk_entry is not None and Path(disk_entry).exists():
@@ -421,7 +427,9 @@ class MeasureWidget(QWidget):
         _, labels_layer = self._selected_layers()
         self._wire_labels_features(labels_layer, table)
 
-    def _wire_labels_features(self, labels_layer, table: "pd.DataFrame") -> None:
+    def _wire_labels_features(
+        self, labels_layer, table: "pd.DataFrame"
+    ) -> None:
         """Feed *table* into the Labels layer's per-label features/coloring.
 
         Also registers :meth:`_on_image_clicked` (image-click -> table-row
@@ -456,7 +464,14 @@ class MeasureWidget(QWidget):
         return path
 
     def _disk_cache_key(
-        self, image_layer, labels_layer, image_data, labels_data, level, stats, scale
+        self,
+        image_layer,
+        labels_layer,
+        image_data,
+        labels_data,
+        level,
+        stats,
+        scale,
     ) -> str:
         """Build a cross-session cache key from stable layer identity.
 
@@ -474,7 +489,11 @@ class MeasureWidget(QWidget):
 
         def source_id(layer, data) -> str:
             path = layer.source.path
-            return str(path) if path else f"name:{layer.name}:{data.shape}:{data.dtype}"
+            return (
+                str(path)
+                if path
+                else f"name:{layer.name}:{data.shape}:{data.dtype}"
+            )
 
         return json.dumps(
             [

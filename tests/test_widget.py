@@ -252,7 +252,9 @@ def test_widget_level_range_updates_for_multiscale(make_napari_viewer):
     assert widget.level_spin.maximum() == 1
 
 
-def test_widget_row_click_selects_label_in_image(qtbot, make_napari_viewer, tmp_path):
+def test_widget_row_click_selects_label_in_image(
+    qtbot, make_napari_viewer, tmp_path
+):
     viewer = make_napari_viewer()
     _add_layers(viewer)
     widget = MeasureWidget(viewer)
@@ -298,10 +300,15 @@ def test_widget_image_click_selects_table_row(
     widget._on_image_clicked(labels_layer, _FakeClickEvent())
 
     assert labels_layer.selected_label == 2
-    assert widget.results_table.item(widget.results_table.currentRow(), 0).text() == "2"
+    assert (
+        widget.results_table.item(widget.results_table.currentRow(), 0).text()
+        == "2"
+    )
 
 
-def test_widget_reload_csv_from_path(qtbot, make_napari_viewer, monkeypatch, tmp_path):
+def test_widget_reload_csv_from_path(
+    qtbot, make_napari_viewer, monkeypatch, tmp_path
+):
     """A CSV from a prior run (possibly another machine/OS) loads via the
     path box, without recomputing — the whole point being it works even
     when the disk-cache manifest's key wouldn't match."""
