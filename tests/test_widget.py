@@ -1,5 +1,6 @@
 import dask.array as da
 import numpy as np
+from qtpy.QtCore import Qt
 
 from napari_chunked_regionprops._widget import (
     MeasureWidget,
@@ -28,9 +29,11 @@ def test_widget_populates_layer_choices(make_napari_viewer):
     widget = MeasureWidget(viewer)
 
     assert [
-        widget.image_combo.itemText(i)
-        for i in range(widget.image_combo.count())
+        widget.image_list.item(i).text()
+        for i in range(widget.image_list.count())
     ] == ["image"]
+    # first population defaults every channel to checked
+    assert widget.image_list.item(0).checkState() == Qt.Checked
     assert [
         widget.labels_combo.itemText(i)
         for i in range(widget.labels_combo.count())
@@ -346,3 +349,59 @@ def test_widget_reload_csv_from_path(
     assert list(fresh_widget._table.index) == list(first_table.index)
     assert "loaded from" in fresh_widget.status_label.text()
     assert "area" in viewer.layers["labels"].features.columns
+
+
+def test_widget_measures_every_checked_channel(
+    qtbot, make_napari_viewer, tmp_path
+):
+    """With several Image layers checked, intensity stats are measured per
+    channel (suffixed by layer name); geometric stats (area/centroid) are
+    computed once, not once per channel."""
+    viewer = make_napari_viewer()
+    lab = np.array(
+        [[1, 1, 0, 0], [1, 1, 0, 0], [0, 0, 2, 2], [0, 0, 2, 2]],
+        dtype="int32",
+    )
+    viewer.add_image(np.full((4, 4), 10, dtype="float32"), name="dapi")
+    viewer.add_image(np.full((4, 4), 20, dtype="float32"), name="gfp")
+    viewer.add_labels(lab, name="labels")
+
+    widget = MeasureWidget(viewer)
+    widget._save_dir = tmp_path
+    # first population defaults every channel to checked -- confirm that,
+    # since it's what makes "just click Measure" measure both by default.
+    assert all(
+        widget.image_list.item(i).checkState() == Qt.Checked
+        for i in range(widget.image_list.count())
+    )
+
+    widget._on_measure_clicked()
+    qtbot.waitUntil(lambda: widget._table is not None, timeout=5000)
+
+    table = widget._table
+    assert "mean_intensity_dapi" in table.columns
+    assert "mean_intensity_gfp" in table.columns
+    assert "mean_intensity" not in table.columns  # only unsuffixed if 1 channel
+    assert table.loc[1, "mean_intensity_dapi"] == 10
+    assert table.loc[1, "mean_intensity_gfp"] == 20
+    # geometric stats present exactly once, not per channel
+    assert "area" in table.columns
+    assert "centroid_y" in table.columns
+    assert "area_dapi" not in table.columns
+
+
+def test_widget_single_checked_channel_keeps_unsuffixed_columns(
+    qtbot, make_napari_viewer, tmp_path
+):
+    """Backward compatibility: with exactly one Image checked (the
+    pre-multi-channel default), column names stay unsuffixed."""
+    viewer = make_napari_viewer()
+    _add_layers(viewer)
+    widget = MeasureWidget(viewer)
+    widget._save_dir = tmp_path
+
+    widget._on_measure_clicked()
+    qtbot.waitUntil(lambda: widget._table is not None, timeout=5000)
+
+    assert "mean_intensity" in widget._table.columns
+    assert "mean_intensity_image" not in widget._table.columns

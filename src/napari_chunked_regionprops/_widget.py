@@ -34,6 +34,11 @@ from ._measure import DEFAULT_STATS, available_stats, iter_measure_labels
 if TYPE_CHECKING:
     import napari
 
+#: Stats that depend only on the Labels layer, not any intensity image —
+#: computed once regardless of how many Image channels are checked, unlike
+#: every other stat (measured per channel, see _on_measure_clicked).
+_GEOMETRIC_STATS = frozenset({"area", "centroid"})
+
 
 def _level_data(layer, level: int):
     """Return one dask array from a (possibly multiscale) layer's data."""
@@ -119,11 +124,11 @@ class MeasureWidget(QWidget):
         layers_layout = QVBoxLayout()
         layers_box.setLayout(layers_layout)
 
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Image:"))
-        self.image_combo = QComboBox()
-        row.addWidget(self.image_combo)
-        layers_layout.addLayout(row)
+        layers_layout.addWidget(
+            QLabel("Image(s) — check every channel to measure:")
+        )
+        self.image_list = QListWidget()
+        layers_layout.addWidget(self.image_list)
 
         row = QHBoxLayout()
         row.addWidget(QLabel("Labels:"))
@@ -223,25 +228,52 @@ class MeasureWidget(QWidget):
     def _refresh_layer_choices(self, event=None):
         from napari.layers import Image, Labels
 
-        prev_image = self.image_combo.currentText()
+        prev_checked = {
+            self.image_list.item(i).text()
+            for i in range(self.image_list.count())
+            if self.image_list.item(i).checkState() == Qt.Checked
+        }
+        first_population = self.image_list.count() == 0
         prev_labels = self.labels_combo.currentText()
-        self.image_combo.clear()
+
+        self.image_list.clear()
         self.labels_combo.clear()
         for layer in self._viewer.layers:
             if isinstance(layer, Image):
-                self.image_combo.addItem(layer.name)
+                item = QListWidgetItem(layer.name)
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                # first time populating: default to "measure every channel"
+                # rather than none, so a fresh widget's Measure button just
+                # works. After that, respect what the user already chose.
+                checked = first_population or layer.name in prev_checked
+                item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+                self.image_list.addItem(item)
             elif isinstance(layer, Labels):
                 self.labels_combo.addItem(layer.name)
-        _restore(self.image_combo, prev_image)
         _restore(self.labels_combo, prev_labels)
         self._update_level_range()
 
+    def _selected_image_layers(self) -> list:
+        names = [
+            self.image_list.item(i).text()
+            for i in range(self.image_list.count())
+            if self.image_list.item(i).checkState() == Qt.Checked
+        ]
+        return [
+            self._viewer.layers[name]
+            for name in names
+            if name in self._viewer.layers
+        ]
+
     def _selected_layers(self):
-        image_name = self.image_combo.currentText()
+        """Return ``(image_layers, labels_layer)``.
+
+        *image_layers* is every checked entry in the Image list (possibly
+        several channels), *labels_layer* the current Labels selection.
+        """
         labels_name = self.labels_combo.currentText()
-        if not image_name or not labels_name:
-            return None, None
-        return self._viewer.layers[image_name], self._viewer.layers[labels_name]
+        labels_layer = self._viewer.layers[labels_name] if labels_name else None
+        return self._selected_image_layers(), labels_layer
 
     def _selected_stats(self) -> tuple[str, ...]:
         stats = []
@@ -257,13 +289,20 @@ class MeasureWidget(QWidget):
         A cache hit populates the results table immediately, with no
         background thread. Otherwise a threaded, progress-reporting
         measurement is started — see :meth:`_on_progress`/:meth:`_on_measured`.
+
+        With multiple Image layers checked, intensity stats (everything
+        except ``area``/``centroid``) are measured once per channel and
+        suffixed with the channel's layer name (e.g.
+        ``mean_intensity_DAPI``) — see the ``_run`` worker below.
         """
         from napari.qt.threading import thread_worker
 
-        image_layer, labels_layer = self._selected_layers()
-        if image_layer is None or labels_layer is None:
+        image_layers, labels_layer = self._selected_layers()
+        if not image_layers or labels_layer is None:
             QMessageBox.warning(
-                self, "Missing layers", "Pick an Image and a Labels layer."
+                self,
+                "Missing layers",
+                "Check at least one Image layer and pick a Labels layer.",
             )
             return
         stats = self._selected_stats()
@@ -274,11 +313,19 @@ class MeasureWidget(QWidget):
             return
 
         level = self.level_spin.value()
-        image_data = _level_data(image_layer, level)
         labels_data = _level_data(labels_layer, level)
         scale = tuple(labels_layer.scale[-labels_data.ndim :])
+        channels = [
+            (layer.name, _level_data(layer, level)) for layer in image_layers
+        ]
 
-        cache_key = (id(image_data), id(labels_data), level, stats, scale)
+        cache_key = (
+            tuple(id(data) for _, data in channels),
+            id(labels_data),
+            level,
+            stats,
+            scale,
+        )
         cached = self._cache.get(cache_key)
         if cached is not None:
             self._on_measured(
@@ -287,9 +334,9 @@ class MeasureWidget(QWidget):
             return
 
         disk_key = self._disk_cache_key(
-            image_layer,
+            image_layers,
             labels_layer,
-            image_data,
+            channels,
             labels_data,
             level,
             stats,
@@ -327,17 +374,62 @@ class MeasureWidget(QWidget):
             self.status_label.setText("Measuring…")
 
         n_workers = self.workers_spin.value()
+        geometric_stats = tuple(s for s in stats if s in _GEOMETRIC_STATS)
+        intensity_stats = tuple(s for s in stats if s not in _GEOMETRIC_STATS)
+        multi_channel = len(channels) > 1
 
         @thread_worker
         def _run():
-            result = yield from iter_measure_labels(
-                image_data,
-                labels_data,
-                stats=stats,
-                scale=scale,
-                n_workers=n_workers,
-                ids=ids_hint,
-            )
+            # ids discovered by whichever call runs first (the whole-volume
+            # scan, if not skipped via ids_hint) are reused for every
+            # subsequent call — no need to rescan per channel.
+            ids = ids_hint
+            tables = []
+
+            def _run_one(data, stats_subset, label_prefix):
+                nonlocal ids
+                gen = iter_measure_labels(
+                    data,
+                    labels_data,
+                    stats=stats_subset,
+                    scale=scale,
+                    n_workers=n_workers,
+                    ids=ids,
+                )
+                try:
+                    while True:
+                        done, total, phase = next(gen)
+                        yield (
+                            done,
+                            total,
+                            (
+                                f"{label_prefix}: {phase}"
+                                if label_prefix
+                                else phase
+                            ),
+                        )
+                except StopIteration as stop:
+                    table = stop.value
+                if ids is None:
+                    ids = table.index.to_numpy()
+                return table
+
+            if geometric_stats:
+                tables.append(
+                    (yield from _run_one(channels[0][1], geometric_stats, None))
+                )
+            if intensity_stats:
+                for name, data in channels:
+                    channel_table = yield from _run_one(
+                        data, intensity_stats, name if multi_channel else None
+                    )
+                    if multi_channel:
+                        channel_table = channel_table.add_suffix(f"_{name}")
+                    tables.append(channel_table)
+
+            result = tables[0]
+            for extra in tables[1:]:
+                result = result.join(extra)
             return result
 
         # Keep a reference on self — an unreferenced worker can be garbage
@@ -465,9 +557,9 @@ class MeasureWidget(QWidget):
 
     def _disk_cache_key(
         self,
-        image_layer,
+        image_layers,
         labels_layer,
-        image_data,
+        channels,
         labels_data,
         level,
         stats,
@@ -480,6 +572,11 @@ class MeasureWidget(QWidget):
         layer's ``source.path`` (the file it was read from) is stable
         across sessions. Falls back to layer name + array shape/dtype for
         in-memory-only layers with no source path.
+
+        *image_layers*/*channels* are parallel sequences (layer objects,
+        (name, data) pairs) for every checked Image channel — order
+        matters (it's part of the key), which is fine since it always
+        comes from the same stable Image-list iteration order.
 
         ponytail: the fallback identifies by name, not content — a
         different array reusing the same layer name would false-hit.
@@ -497,7 +594,10 @@ class MeasureWidget(QWidget):
 
         return json.dumps(
             [
-                source_id(image_layer, image_data),
+                [
+                    source_id(layer, data)
+                    for layer, (_, data) in zip(image_layers, channels)
+                ],
                 source_id(labels_layer, labels_data),
                 level,
                 list(stats),
