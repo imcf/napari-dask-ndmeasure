@@ -32,8 +32,8 @@ def test_measure_labels_default_stats():
     table = measure_labels(img, lab)
 
     assert list(table.index) == [1, 2]
-    assert table.loc[1, "area"] == 4
-    assert table.loc[2, "area"] == 4
+    assert table.loc[1, "area_voxels"] == 4
+    assert table.loc[2, "area_voxels"] == 4
     # label 1 = pixels 0,1,4,5 -> mean 2.5; label 2 = pixels 10,11,14,15 -> mean 12.5
     assert table.loc[1, "mean_intensity"] == pytest.approx(2.5)
     assert table.loc[2, "mean_intensity"] == pytest.approx(12.5)
@@ -44,14 +44,14 @@ def test_measure_labels_default_stats():
 
 def test_measure_labels_only_requested_stats():
     img, lab = _synthetic()
-    table = measure_labels(img, lab, stats=("area",))
-    assert list(table.columns) == ["area"]
+    table = measure_labels(img, lab, stats=("area_voxels",))
+    assert list(table.columns) == ["area_voxels"]
 
 
 def test_measure_labels_scale_adds_um_columns():
     img, lab = _synthetic()
     table = measure_labels(
-        img, lab, stats=("area", "centroid"), scale=(0.5, 0.2)
+        img, lab, stats=("area_voxels", "centroid"), scale=(0.5, 0.2)
     )
     assert table.loc[1, "area_um2"] == pytest.approx(4 * 0.5 * 0.2)
     assert table.loc[1, "centroid_y_um"] == pytest.approx(0.5 * 0.5)
@@ -128,8 +128,8 @@ def test_measure_labels_small_single_chunk_input_still_correct():
     lab = da.asarray(np.ones((400, 400), dtype="int32"))
     assert not _needs_rechunk(lab)
 
-    table = measure_labels(img, lab, stats=("area",))
-    assert table.loc[1, "area"] == 400 * 400
+    table = measure_labels(img, lab, stats=("area_voxels",))
+    assert table.loc[1, "area_voxels"] == 400 * 400
 
 
 def _drain(gen):
@@ -150,7 +150,7 @@ def test_iter_measure_labels_yields_progress_then_returns_table():
     # counts (not a fixed count — exact task counts are a dask-graph
     # implementation detail we shouldn't pin to a magic number).
     img, lab = _synthetic()
-    gen = iter_measure_labels(img, lab, stats=("area", "mean_intensity"))
+    gen = iter_measure_labels(img, lab, stats=("area_voxels", "mean_intensity"))
     progress, table = _drain(gen)
 
     assert progress, "expected at least one progress update"
@@ -169,7 +169,7 @@ def test_iter_measure_labels_yields_progress_then_returns_table():
     for done, total, _ in progress:
         assert 0 <= done <= total
 
-    assert table.loc[1, "area"] == 4
+    assert table.loc[1, "area_voxels"] == 4
 
 
 def test_lazy_measure_graph_scales_with_chunks_not_objects():
@@ -192,7 +192,7 @@ def test_lazy_measure_graph_scales_with_chunks_not_objects():
     ids = np.arange(1, n_objects + 1)
     n_chunks = labels.numblocks[0] * labels.numblocks[1]
 
-    graph = _lazy_measure(image, labels, ids, ("area", "mean_intensity"))
+    graph = _lazy_measure(image, labels, ids, ("area_voxels", "mean_intensity"))
     n_tasks = len(graph.__dask_graph__())
 
     # A per-object-id design would need on the order of n_chunks * n_objects
@@ -246,12 +246,14 @@ def test_iter_measure_labels_ids_skips_the_scan(monkeypatch):
     monkeypatch.setattr("napari_chunked_regionprops._measure.da.unique", _boom)
 
     img, lab = _synthetic()
-    gen = iter_measure_labels(img, lab, stats=("area",), ids=np.array([1, 2]))
+    gen = iter_measure_labels(
+        img, lab, stats=("area_voxels",), ids=np.array([1, 2])
+    )
     progress, table = _drain(gen)
 
     assert all(p[2] != "scanning for objects" for p in progress)
-    assert table.loc[1, "area"] == 4
-    assert table.loc[2, "area"] == 4
+    assert table.loc[1, "area_voxels"] == 4
+    assert table.loc[2, "area_voxels"] == 4
 
 
 def test_measure_labels_ids_matches_scanned_result():

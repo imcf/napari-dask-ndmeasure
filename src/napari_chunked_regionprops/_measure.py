@@ -27,7 +27,7 @@ from dask.diagnostics import Callback
 #: stat name -> whether it needs the real intensity image (False = purely
 #: geometric, derived from label positions alone).
 _STATS: dict[str, bool] = {
-    "area": False,
+    "area_voxels": False,
     "centroid": False,
     "mean_intensity": True,
     "std_intensity": True,
@@ -36,7 +36,7 @@ _STATS: dict[str, bool] = {
     "weighted_centroid": True,
 }
 
-DEFAULT_STATS = ("area", "centroid", "mean_intensity", "std_intensity")
+DEFAULT_STATS = ("area_voxels", "centroid", "mean_intensity", "std_intensity")
 
 # Target ~128 MB dask chunks (dask's own default) when an input isn't already
 # chunked sensibly. Without this, a plain numpy array (or a dask array
@@ -201,7 +201,7 @@ def available_stats() -> tuple[str, ...]:
     Examples
     --------
     >>> available_stats()
-    ('area', 'centroid', 'mean_intensity', 'std_intensity', 'min_intensity', 'max_intensity', 'weighted_centroid')
+    ('area_voxels', 'centroid', 'mean_intensity', 'std_intensity', 'min_intensity', 'max_intensity', 'weighted_centroid')
     """
     return tuple(_STATS)
 
@@ -255,7 +255,7 @@ def _ensure_chunked(image: Any, labels: Any) -> tuple[da.Array, da.Array]:
 #: :func:`_chunk_partial`/:func:`_merge_partials`). Union these across every
 #: requested stat to know what a given call actually has to compute.
 _STAT_WANTS: dict[str, tuple[str, ...]] = {
-    "area": ("count",),
+    "area_voxels": ("count",),
     "centroid": ("count", "pos_sum"),
     "mean_intensity": ("count", "sum"),
     "std_intensity": ("count", "sum", "sumsq"),
@@ -391,7 +391,7 @@ def _merge_partials(
     Returns
     -------
     dict of str to np.ndarray
-        One entry per output column (e.g. ``"area"``, ``"centroid_y"``,
+        One entry per output column (e.g. ``"area_voxels"``, ``"centroid_y"``,
         ``"mean_intensity"``), each aligned index-for-index with *ids*.
     """
     want = frozenset(w for s in stats for w in _STAT_WANTS[s])
@@ -431,8 +431,8 @@ def _merge_partials(
     axis_names = "zyx"[-ndim:]
     columns: dict[str, np.ndarray] = {}
     for stat in stats:
-        if stat == "area":
-            columns["area"] = count
+        if stat == "area_voxels":
+            columns["area_voxels"] = count
         elif stat == "mean_intensity":
             columns["mean_intensity"] = sum_ / count
         elif stat == "std_intensity":
@@ -525,7 +525,7 @@ def iter_measure_labels(
         Integer label array (0 = background).
     stats : sequence of str, optional
         Which measurements to compute — see :func:`available_stats`.
-        Default: area, centroid, mean/std intensity.
+        Default: area_voxels, centroid, mean/std intensity.
     scale : sequence of float or None, optional
         Physical size per axis. See :func:`measure_labels`.
     n_workers : int or None, optional
@@ -588,7 +588,7 @@ def iter_measure_labels(
     >>> lab = da.from_array(
     ...     np.array([[1, 1, 0, 0], [1, 1, 0, 0], [0, 0, 2, 2], [0, 0, 2, 2]])
     ... )
-    >>> gen = iter_measure_labels(img, lab, stats=("area", "mean_intensity"))
+    >>> gen = iter_measure_labels(img, lab, stats=("area_voxels", "mean_intensity"))
     >>> progress = []
     >>> try:
     ...     while True:
@@ -597,7 +597,7 @@ def iter_measure_labels(
     ...     table = stop.value
     >>> sorted({p[2] for p in progress})
     ['computing 2 measurement(s)', 'scanning for objects']
-    >>> int(table.loc[1, "area"])
+    >>> int(table.loc[1, "area_voxels"])
     4
     """
     if image.shape != labels.shape:
@@ -651,9 +651,9 @@ def iter_measure_labels(
 
     if scale is not None:
         scale_arr = np.asarray(scale, dtype="float64")
-        if "area" in table.columns:
+        if "area_voxels" in table.columns:
             table["area_um3" if len(scale_arr) == 3 else "area_um2"] = table[
-                "area"
+                "area_voxels"
             ] * np.prod(scale_arr)
         for prefix in ("centroid", "weighted_centroid"):
             cols = [c for c in table.columns if c.startswith(f"{prefix}_")]
@@ -683,12 +683,13 @@ def measure_labels(
         Integer label array (0 = background).
     stats : sequence of str, optional
         Which measurements to compute — see :func:`available_stats`.
-        Default: area, centroid, mean/std intensity.
+        Default: area_voxels, centroid, mean/std intensity.
     scale : sequence of float or None, optional
         Physical size per axis (e.g. from the napari layer's ``scale``).
-        When given, ``area`` is reported in physical units (voxel count ×
-        voxel volume) and centroid columns get a ``_um`` twin alongside the
-        pixel-coordinate one.
+        When given, ``area_voxels`` gets an ``area_um3``/``area_um2`` twin
+        reported in physical units (voxel count × voxel volume), and
+        centroid columns get a ``_um`` twin alongside the pixel-coordinate
+        one.
     n_workers : int or None, optional
         Threads used for the combined stat computation. Default
         ``min(4, cpu_count)`` — see :func:`iter_measure_labels` for the
@@ -711,8 +712,8 @@ def measure_labels(
     >>> lab = da.from_array(
     ...     np.array([[1, 1, 0, 0], [1, 1, 0, 0], [0, 0, 2, 2], [0, 0, 2, 2]])
     ... )
-    >>> table = measure_labels(img, lab, stats=("area", "mean_intensity"))
-    >>> int(table.loc[1, "area"])
+    >>> table = measure_labels(img, lab, stats=("area_voxels", "mean_intensity"))
+    >>> int(table.loc[1, "area_voxels"])
     4
     """
     gen = iter_measure_labels(

@@ -60,7 +60,7 @@ def test_widget_measure_end_to_end(qtbot, make_napari_viewer, tmp_path):
     assert "(cached)" not in widget.status_label.text()
 
     labels_layer = viewer.layers["labels"]
-    assert "area" in labels_layer.features.columns
+    assert "area_voxels" in labels_layer.features.columns
 
 
 def test_widget_measure_auto_saves_csv(qtbot, make_napari_viewer, tmp_path):
@@ -74,7 +74,7 @@ def test_widget_measure_auto_saves_csv(qtbot, make_napari_viewer, tmp_path):
 
     saved = tmp_path / "labels_measurements.csv"
     assert saved.exists()
-    assert "area" in saved.read_text()
+    assert "area_voxels" in saved.read_text()
     assert f"Saved to {saved}" in widget.status_label.text()
 
 
@@ -179,7 +179,7 @@ def test_widget_save_csv_writes_table_and_remembers_dir(
     widget._on_save_clicked()
 
     assert target.exists()
-    assert "area" in target.read_text()
+    assert "area_voxels" in target.read_text()
     assert widget._save_dir == target.parent
 
 
@@ -241,7 +241,7 @@ def test_widget_measure_uses_metadata_hint_to_skip_scan(
 
     qtbot.waitUntil(lambda: widget._table is not None, timeout=5000)
     assert list(widget._table.index) == [1, 2]
-    assert widget._table.loc[1, "area"] == 4
+    assert widget._table.loc[1, "area_voxels"] == 4
 
 
 def test_widget_level_range_updates_for_multiscale(make_napari_viewer):
@@ -495,15 +495,15 @@ def test_widget_reload_csv_from_path(
     assert fresh_widget._table is not None
     assert list(fresh_widget._table.index) == list(first_table.index)
     assert "loaded from" in fresh_widget.status_label.text()
-    assert "area" in viewer.layers["labels"].features.columns
+    assert "area_voxels" in viewer.layers["labels"].features.columns
 
 
 def test_widget_measures_every_checked_channel(
     qtbot, make_napari_viewer, tmp_path
 ):
     """With several Image layers checked, intensity stats are measured per
-    channel (suffixed by layer name); geometric stats (area/centroid) are
-    computed once, not once per channel."""
+    channel (suffixed by layer name); geometric stats (area_voxels/centroid)
+    are computed once, not once per channel."""
     viewer = make_napari_viewer()
     lab = np.array(
         [[1, 1, 0, 0], [1, 1, 0, 0], [0, 0, 2, 2], [0, 0, 2, 2]],
@@ -532,9 +532,9 @@ def test_widget_measures_every_checked_channel(
     assert table.loc[1, "mean_intensity_dapi"] == 10
     assert table.loc[1, "mean_intensity_gfp"] == 20
     # geometric stats present exactly once, not per channel
-    assert "area" in table.columns
+    assert "area_voxels" in table.columns
     assert "centroid_y" in table.columns
-    assert "area_dapi" not in table.columns
+    assert "area_voxels_dapi" not in table.columns
 
 
 def test_widget_single_checked_channel_keeps_unsuffixed_columns(

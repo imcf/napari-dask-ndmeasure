@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 #: Stats that depend only on the Labels layer, not any intensity image —
 #: computed once regardless of how many Image channels are checked, unlike
 #: every other stat (measured per channel, see _on_measure_clicked).
-_GEOMETRIC_STATS = frozenset({"area", "centroid"})
+_GEOMETRIC_STATS = frozenset({"area_voxels", "centroid"})
 
 
 def _level_data(layer, level: int):
@@ -316,7 +316,7 @@ class MeasureWidget(QWidget):
         measurement is started — see :meth:`_on_progress`/:meth:`_on_measured`.
 
         With multiple Image layers checked, intensity stats (everything
-        except ``area``/``centroid``) are measured once per channel and
+        except ``area_voxels``/``centroid``) are measured once per channel and
         suffixed with the channel's layer name (e.g.
         ``mean_intensity_DAPI``) — see the ``_run`` worker below.
         """
@@ -747,10 +747,10 @@ class MeasureWidget(QWidget):
         """Center and zoom the camera on *label_id*'s object, jumping to
         its z-slice too if the labels array is 3D.
 
-        Needs the ``centroid`` and ``area`` stats to have been measured
+        Needs the ``centroid`` and ``area_voxels`` stats to have been measured
         (or reloaded) for this label — silently does nothing otherwise.
 
-        ponytail: "linear size" is a rough ``area ** (1/ndim)`` estimate
+        ponytail: "linear size" is a rough ``area_voxels ** (1/ndim)`` estimate
         (voxel count -> a cube-root/sqrt length), not the object's real
         bounding box, so very elongated objects won't be framed tightly.
         Canvas size comes from the private ``_qt_viewer.canvas`` (no
@@ -765,7 +765,7 @@ class MeasureWidget(QWidget):
         row = self._table.loc[label_id]
         ndim = labels_layer.ndim
         centroid_cols = [f"centroid_{ax}" for ax in "zyx"[-ndim:]]
-        if "area" not in row.index or not all(
+        if "area_voxels" not in row.index or not all(
             c in row.index for c in centroid_cols
         ):
             return
@@ -781,7 +781,7 @@ class MeasureWidget(QWidget):
                 current_step[-3] = int(round(row["centroid_z"]))
                 self._viewer.dims.current_step = current_step
 
-        linear_size = row["area"] ** (1 / ndim) * np.mean(
+        linear_size = row["area_voxels"] ** (1 / ndim) * np.mean(
             labels_layer.scale[-ndim:]
         )
         if linear_size <= 0:

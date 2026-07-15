@@ -94,7 +94,7 @@ faster.
 
 | Stat | Needs intensity image | Notes |
 |---|---|---|
-| `area` | no | voxel count (+ `area_um2`/`area_um3` if the layer is calibrated) |
+| `area_voxels` | no | voxel count (+ `area_um2`/`area_um3` if the layer is calibrated) |
 | `centroid` | no | geometric centroid, one column per axis (+ `_um` twins) |
 | `weighted_centroid` | yes | intensity-weighted centroid |
 | `mean_intensity` | yes | |
