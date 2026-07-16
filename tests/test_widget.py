@@ -433,7 +433,7 @@ def test_widget_image_drag_does_not_select_row(
 def test_widget_image_click_handles_multiscale_tuple_return(
     qtbot, make_napari_viewer, monkeypatch, tmp_path
 ):
-    """Multiscale layers' get_value() returns (value, level), not a bare
+    """Multiscale layers' get_value() returns (level, value), not a bare
     value -- int() on that tuple used to raise and get silently swallowed,
     which looked exactly like clicking doing nothing."""
     viewer = make_napari_viewer()
@@ -453,7 +453,7 @@ def test_widget_image_click_handles_multiscale_tuple_return(
     qtbot.waitUntil(lambda: widget._table is not None, timeout=5000)
 
     labels_layer = viewer.layers["labels"]
-    monkeypatch.setattr(labels_layer, "get_value", lambda *a, **k: (2, 0))
+    monkeypatch.setattr(labels_layer, "get_value", lambda *a, **k: (0, 2))
 
     _run_image_click(widget, _FakeClickEvent())
 

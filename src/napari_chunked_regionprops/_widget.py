@@ -832,6 +832,14 @@ class MeasureWidget(QWidget):
         dimming every other label and making them appear to vanish as soon
         as the user moved the view. Waiting for release-without-movement
         distinguishes a real click from a drag.
+
+        Note on 3D + multiscale: napari always renders 3D volumes at the
+        coarsest pyramid level (``ScalarFieldBase._update_level_and_corners``
+        forces this — vispy's Volume visual can't stream tiles the way the
+        2D canvas can). Small objects that vanish at that downsampled level
+        are therefore unreachable by ray-cast picking in 3D regardless of
+        this fix; that's a napari rendering constraint, not something this
+        handler can work around.
         """
         _, labels_layer = self._selected_layers()
         if labels_layer is None:
@@ -849,13 +857,15 @@ class MeasureWidget(QWidget):
             dims_displayed=event.dims_displayed,
             world=True,
         )
-        # Multiscale layers return (value, level) instead of a bare value —
-        # this plugin is built around pyramids, so that's the common case,
-        # not an edge case. int(value) on the tuple used to raise and get
-        # silently swallowed, which looked exactly like "clicking does
-        # nothing" even with the Labels layer active.
+        # Multiscale layers return (data_level, value), not a bare value --
+        # this plugin's whole point is multiscale/pyramid support, so
+        # that's the common case here, not an edge case. Indexing the wrong
+        # element (or int()-ing the tuple directly) picks up the pyramid
+        # level instead of the label id, which "succeeds" silently and
+        # selects the wrong row -- or no row at all, since the pyramid
+        # level index rarely matches a real label id in the results table.
         if isinstance(value, tuple):
-            value = value[0]
+            value = value[1]
         if not value:
             return
         target = str(int(value))
