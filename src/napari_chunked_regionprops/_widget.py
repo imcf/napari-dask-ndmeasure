@@ -269,10 +269,15 @@ class MeasureWidget(QWidget):
         layout.addWidget(self.clear_selection_btn)
 
         colormap_box = QGroupBox("Color by measurement")
+        colormap_box_layout = QVBoxLayout()
+        colormap_box.setLayout(colormap_box_layout)
         colormap_layout = QHBoxLayout()
-        colormap_box.setLayout(colormap_layout)
+        colormap_box_layout.addLayout(colormap_layout)
         colormap_layout.addWidget(QLabel("Column:"))
         self.colormap_column_combo = QComboBox()
+        self.colormap_column_combo.currentIndexChanged.connect(
+            self._update_colormap_preview
+        )
         colormap_layout.addWidget(self.colormap_column_combo)
         colormap_layout.addWidget(QLabel("LUT:"))
         self.colormap_name_combo = QComboBox()
@@ -280,6 +285,9 @@ class MeasureWidget(QWidget):
 
         self.colormap_name_combo.addItems(sorted(AVAILABLE_COLORMAPS))
         self.colormap_name_combo.setCurrentText("viridis")
+        self.colormap_name_combo.currentIndexChanged.connect(
+            self._update_colormap_preview
+        )
         colormap_layout.addWidget(self.colormap_name_combo)
         self.apply_colormap_btn = QPushButton("Apply")
         self.apply_colormap_btn.clicked.connect(self._on_apply_colormap_clicked)
@@ -288,6 +296,18 @@ class MeasureWidget(QWidget):
         self.reset_colors_btn.clicked.connect(self._on_reset_colors_clicked)
         self.reset_colors_btn.setEnabled(False)
         colormap_layout.addWidget(self.reset_colors_btn)
+
+        preview_layout = QHBoxLayout()
+        colormap_box_layout.addLayout(preview_layout)
+        self.colormap_min_label = QLabel("")
+        preview_layout.addWidget(self.colormap_min_label)
+        self.colormap_preview_label = QLabel()
+        self.colormap_preview_label.setFixedHeight(16)
+        self.colormap_preview_label.setScaledContents(True)
+        preview_layout.addWidget(self.colormap_preview_label, stretch=1)
+        self.colormap_max_label = QLabel("")
+        preview_layout.addWidget(self.colormap_max_label)
+
         layout.addWidget(colormap_box)
 
         self.save_btn = QPushButton("Save CSV…")
@@ -752,6 +772,41 @@ class MeasureWidget(QWidget):
             list(table.select_dtypes(include="number").columns)
         )
         _restore(self.colormap_column_combo, previous)
+        self._update_colormap_preview()
+
+    def _update_colormap_preview(self) -> None:
+        """Draw a gradient bar for the currently picked LUT, labelled with
+        the selected column's min/max, so it's clear which color a value
+        maps to before (or after) hitting Apply — mirrors the low-to-high
+        mapping :meth:`_apply_measurement_colormap` actually applies.
+        """
+        column = self.colormap_column_combo.currentText()
+        if (
+            self._table is None
+            or not column
+            or column not in self._table.columns
+        ):
+            self.colormap_preview_label.clear()
+            self.colormap_min_label.setText("")
+            self.colormap_max_label.setText("")
+            return
+
+        from qtpy.QtGui import QImage, QPixmap
+
+        from napari.utils.colormaps import ensure_colormap
+
+        width = 200
+        cmap = ensure_colormap(self.colormap_name_combo.currentText())
+        gradient = cmap.map(np.linspace(0.0, 1.0, width))
+        rgb = np.ascontiguousarray((gradient[:, :3] * 255).astype("uint8"))
+        image = QImage(
+            rgb.tobytes(), width, 1, width * 3, QImage.Format_RGB888
+        ).copy()
+        self.colormap_preview_label.setPixmap(QPixmap.fromImage(image))
+
+        values = self._table[column]
+        self.colormap_min_label.setText(f"{values.min():.4g}")
+        self.colormap_max_label.setText(f"{values.max():.4g}")
 
     def _on_apply_colormap_clicked(self) -> None:
         if self._table is None or self._table.empty:

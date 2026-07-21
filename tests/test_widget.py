@@ -235,6 +235,46 @@ def test_widget_color_by_measurement_ranks_low_to_high(
     assert not widget.reset_colors_btn.isEnabled()
 
 
+def test_widget_colormap_preview_shows_gradient_and_range(
+    qtbot, make_napari_viewer, tmp_path
+):
+    """The LUT preview bar must span the selected LUT low-to-high and its
+    min/max labels must track whichever column is picked -- so users can
+    tell what color represents what before/after coloring the layer."""
+    viewer = make_napari_viewer()
+    _add_layers(viewer)
+    widget = MeasureWidget(viewer)
+    widget._save_dir = tmp_path
+
+    widget._on_measure_clicked()
+    qtbot.waitUntil(lambda: widget._table is not None, timeout=5000)
+
+    widget.colormap_column_combo.setCurrentText("area_voxels")
+    widget.colormap_name_combo.setCurrentText("viridis")
+
+    pixmap = widget.colormap_preview_label.pixmap()
+    assert pixmap is not None and not pixmap.isNull()
+    preview = pixmap.toImage()
+    from napari.utils.colormaps import ensure_colormap
+
+    viridis = ensure_colormap("viridis")
+    lo = (viridis.map(np.array([0.0]))[0, :3] * 255).astype("uint8")
+    hi = (viridis.map(np.array([1.0]))[0, :3] * 255).astype("uint8")
+    left = preview.pixelColor(0, 0)
+    right = preview.pixelColor(preview.width() - 1, 0)
+    assert [left.red(), left.green(), left.blue()] == list(lo)
+    assert [right.red(), right.green(), right.blue()] == list(hi)
+
+    values = widget._table["area_voxels"]
+    assert widget.colormap_min_label.text() == f"{values.min():.4g}"
+    assert widget.colormap_max_label.text() == f"{values.max():.4g}"
+
+    widget.colormap_column_combo.setCurrentText("mean_intensity")
+    values = widget._table["mean_intensity"]
+    assert widget.colormap_min_label.text() == f"{values.min():.4g}"
+    assert widget.colormap_max_label.text() == f"{values.max():.4g}"
+
+
 def test_sequential_ids_hint_present_at_level_zero(make_napari_viewer):
     viewer = make_napari_viewer()
     _add_layers(viewer)
