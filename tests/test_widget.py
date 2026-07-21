@@ -183,6 +183,58 @@ def test_widget_save_csv_writes_table_and_remembers_dir(
     assert widget._save_dir == target.parent
 
 
+def test_widget_color_by_measurement_ranks_low_to_high(
+    qtbot, make_napari_viewer, tmp_path
+):
+    """Applying a LUT by area_voxels must put the smallest object at the
+    low end and the largest at the high end -- and Reset colors must put
+    napari's default coloring back afterwards."""
+    viewer = make_napari_viewer()
+    img = np.arange(16, dtype="float32").reshape(4, 4)
+    lab = np.array(
+        [
+            [1, 1, 0, 0],
+            [1, 1, 0, 3],
+            [0, 0, 2, 3],
+            [0, 0, 2, 2],
+        ],
+        dtype="int32",
+    )
+    viewer.add_image(img, name="image")
+    labels_layer = viewer.add_labels(lab, name="labels")
+    original_colormap = labels_layer.colormap
+
+    widget = MeasureWidget(viewer)
+    widget._save_dir = tmp_path
+
+    widget._on_measure_clicked()
+    qtbot.waitUntil(lambda: widget._table is not None, timeout=5000)
+    # label 3 (area 2) < label 2 (area 3) < label 1 (area 4)
+    assert list(widget._table["area_voxels"]) == [4.0, 3.0, 2.0]
+
+    assert "area_voxels" in [
+        widget.colormap_column_combo.itemText(i)
+        for i in range(widget.colormap_column_combo.count())
+    ]
+    widget.colormap_column_combo.setCurrentText("area_voxels")
+    widget.colormap_name_combo.setCurrentText("viridis")
+    widget._on_apply_colormap_clicked()
+
+    from napari.utils.colormaps import ensure_colormap
+
+    color_dict = labels_layer.colormap.color_dict
+    viridis = ensure_colormap("viridis")
+    lo = viridis.map(np.array([0.0]))[0]
+    hi = viridis.map(np.array([1.0]))[0]
+    assert np.allclose(color_dict[3], lo)  # smallest area -> low end
+    assert np.allclose(color_dict[1], hi)  # largest area -> high end
+    assert widget.reset_colors_btn.isEnabled()
+
+    widget._on_reset_colors_clicked()
+    assert labels_layer.colormap is original_colormap
+    assert not widget.reset_colors_btn.isEnabled()
+
+
 def test_sequential_ids_hint_present_at_level_zero(make_napari_viewer):
     viewer = make_napari_viewer()
     _add_layers(viewer)

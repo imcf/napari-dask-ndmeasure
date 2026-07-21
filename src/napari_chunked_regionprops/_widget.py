@@ -159,6 +159,11 @@ class MeasureWidget(QWidget):
         # back exactly. None when no highlight is active.
         self._highlighted_labels_layer = None
         self._orig_colormap = None
+        # The Labels layer currently recolored by a measurement column (see
+        # _apply_measurement_colormap) and its colormap from just before
+        # that, so "Reset colors" can restore it exactly.
+        self._measurement_colored_layer = None
+        self._pre_measurement_colormap = None
 
         layout = QVBoxLayout()
         self.setLayout(layout)
@@ -262,6 +267,30 @@ class MeasureWidget(QWidget):
         )
         self.clear_selection_btn.setEnabled(False)
         layout.addWidget(self.clear_selection_btn)
+
+        colormap_box = QGroupBox("Color by measurement")
+        colormap_layout = QHBoxLayout()
+        colormap_box.setLayout(colormap_layout)
+        colormap_layout.addWidget(QLabel("Column:"))
+        self.colormap_column_combo = QComboBox()
+        colormap_layout.addWidget(self.colormap_column_combo)
+        colormap_layout.addWidget(QLabel("LUT:"))
+        self.colormap_name_combo = QComboBox()
+        from napari.utils.colormaps import AVAILABLE_COLORMAPS
+
+        self.colormap_name_combo.addItems(sorted(AVAILABLE_COLORMAPS))
+        self.colormap_name_combo.setCurrentText("viridis")
+        colormap_layout.addWidget(self.colormap_name_combo)
+        self.apply_colormap_btn = QPushButton("Apply")
+        self.apply_colormap_btn.clicked.connect(
+            self._on_apply_colormap_clicked
+        )
+        colormap_layout.addWidget(self.apply_colormap_btn)
+        self.reset_colors_btn = QPushButton("Reset colors")
+        self.reset_colors_btn.clicked.connect(self._on_reset_colors_clicked)
+        self.reset_colors_btn.setEnabled(False)
+        colormap_layout.addWidget(self.reset_colors_btn)
+        layout.addWidget(colormap_box)
 
         self.save_btn = QPushButton("Save CSV…")
         self.save_btn.clicked.connect(self._on_save_clicked)
@@ -581,6 +610,7 @@ class MeasureWidget(QWidget):
         suffix = f" ({cache_note})" if cache_note else ""
         status = f"{len(table)} objects measured.{suffix}"
         self._populate_table(table)
+        self._refresh_colormap_columns(table)
         self.save_btn.setEnabled(not table.empty)
 
         if not table.empty:
@@ -713,6 +743,88 @@ class MeasureWidget(QWidget):
                     row, col, _NumericTableWidgetItem(f"{value:.4g}")
                 )
         self.results_table.setSortingEnabled(True)
+
+    def _refresh_colormap_columns(self, table: "pd.DataFrame") -> None:
+        """Repopulate the "Color by measurement" column picker with
+        *table*'s numeric columns, keeping the previous selection if it's
+        still there."""
+        previous = self.colormap_column_combo.currentText()
+        self.colormap_column_combo.clear()
+        self.colormap_column_combo.addItems(
+            list(table.select_dtypes(include="number").columns)
+        )
+        _restore(self.colormap_column_combo, previous)
+
+    def _on_apply_colormap_clicked(self) -> None:
+        if self._table is None or self._table.empty:
+            return
+        column = self.colormap_column_combo.currentText()
+        if not column:
+            QMessageBox.warning(
+                self, "No column", "Pick a measurement column first."
+            )
+            return
+        _, labels_layer = self._selected_layers()
+        if labels_layer is None:
+            return
+        self._apply_measurement_colormap(
+            labels_layer, column, self.colormap_name_combo.currentText()
+        )
+        self.reset_colors_btn.setEnabled(True)
+
+    def _apply_measurement_colormap(
+        self, labels_layer, column: str, colormap_name: str
+    ) -> None:
+        """Recolor every labelled object along *colormap_name* by its
+        *column* value in :attr:`_table` — the smallest value gets the
+        low end of the LUT, the largest the high end — replacing napari's
+        default random per-label colors. Objects tied at the same value
+        (or if every value is equal) get the LUT's midpoint.
+
+        Clears any active row-selection highlight first (see
+        :meth:`_apply_highlight`): recoloring the base view while a
+        highlight overlay is active would otherwise leave that
+        highlight's "restore to" colormap pointing at stale colors.
+        """
+        from napari.utils.colormaps import DirectLabelColormap, ensure_colormap
+
+        if labels_layer is self._highlighted_labels_layer:
+            self.results_table.clearSelection()
+            self._highlighted_labels_layer = None
+            self._orig_colormap = None
+
+        if labels_layer is not self._measurement_colored_layer:
+            self._pre_measurement_colormap = labels_layer.colormap
+            self._measurement_colored_layer = labels_layer
+
+        values = self._table[column].astype(float)
+        vmin, vmax = values.min(), values.max()
+        span = vmax - vmin
+        normalized = (
+            np.full(len(values), 0.5)
+            if span == 0
+            else ((values - vmin) / span).to_numpy()
+        )
+        rgba = ensure_colormap(colormap_name).map(normalized)
+
+        color_dict = {
+            int(label_id): rgba[i]
+            for i, label_id in enumerate(self._table.index)
+        }
+        color_dict[0] = np.zeros(4, dtype="float32")
+        color_dict[None] = np.zeros(4, dtype="float32")
+        labels_layer.colormap = DirectLabelColormap(color_dict=color_dict)
+
+    def _on_reset_colors_clicked(self) -> None:
+        """Undo :meth:`_apply_measurement_colormap`, restoring whatever
+        coloring the Labels layer had right before it was first applied."""
+        if self._measurement_colored_layer is not None:
+            self._measurement_colored_layer.colormap = (
+                self._pre_measurement_colormap
+            )
+            self._measurement_colored_layer = None
+            self._pre_measurement_colormap = None
+        self.reset_colors_btn.setEnabled(False)
 
     def _on_result_row_clicked(self, row: int, column: int) -> None:
         """Clicking a results-table row centers/zooms the camera on that
@@ -966,6 +1078,7 @@ class MeasureWidget(QWidget):
 
         self._table = table
         self._populate_table(table)
+        self._refresh_colormap_columns(table)
         self.save_btn.setEnabled(not table.empty)
         self.status_label.setText(f"{len(table)} objects loaded from {path}.")
 
